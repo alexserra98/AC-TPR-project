@@ -1,0 +1,36 @@
+{
+  "run_directory": "/orfeo/cephfs/scratch/dssc/zenocosini/ac-tpr-cache/interventions/pythia-6.9b-step143000-generated-agent-tl4",
+  "run_created_at": "2026-10-03T11:51:43.802664+00:00",
+  "model": {
+    "api": "TransformerBridge",
+    "attention_bridge": "native",
+    "attention_implementation": "sdpa",
+    "backend": "transformer_lens",
+    "commit": "21bfa02e806e253fe453702c29c81d9f83617255",
+    "dtype": "float16",
+    "name": "EleutherAI/pythia-6.9b",
+    "revision": "step143000",
+    "transformer_lens_version": "4.0.0",
+    "weight_processing": "none"
+  },
+  "execution_model": {
+    "api": "TransformerBridge",
+    "attention_bridge": "native",
+    "attention_implementation": "sdpa",
+    "backend": "transformer_lens",
+    "commit": "21bfa02e806e253fe453702c29c81d9f83617255",
+    "dtype": "float16",
+    "name": "EleutherAI/pythia-6.9b",
+    "revision": "step143000",
+    "transformer_lens_version": "4.0.0",
+    "weight_processing": "none"
+  },
+  "schema_version": 2,
+  "source_sha256": {
+    "metadata.json": "b3cf8074bc8b335f74b2db71da65a35eae7014e20f5bcd6eed1184a1ae798147",
+    "baseline.csv": "5a44dd04810bacc7b1f2158ee3bd8b4ad4f4f4e3eec593d4ae2dbb5fe1ebf24f",
+    "summary.csv": "afe84dcb214c5943b81376ff1a8e9bbd9c8e019929dce8039f7fb323ce9e3b2d"
+  },
+  "conditional_flip_rate": "agent_to_patient_flip_rate / baseline_agent_preference_rate",
+  "uncertainty": "Descriptive curves; no uncertainty intervals"
+}

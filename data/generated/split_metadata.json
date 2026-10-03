@@ -1,0 +1,109 @@
+{
+  "counts": {
+    "included_pairs": 1920,
+    "pairs_by_split": {
+      "gen_test": 864,
+      "test": 106,
+      "train": 844,
+      "val": 106
+    },
+    "sentences": 3840,
+    "sentences_by_split": {
+      "gen_test": 1728,
+      "test": 212,
+      "train": 1688,
+      "val": 212
+    }
+  },
+  "held_out_nouns": [
+    "artist",
+    "child",
+    "soldier",
+    "teacher"
+  ],
+  "seed": 42,
+  "source": "data/fillers.csv",
+  "source_sha256": "47344dd5f95916543d678c8a7d33c47b834ed42e29a3abf6366be66f36d12c9b",
+  "split_rules": {
+    "boundaries": "floor(0.8 * groups), floor(0.9 * groups)",
+    "gen_test": "Either noun belongs to held_out_nouns",
+    "random_split_unit": "Unordered noun pair and verb lemma",
+    "ratios_on_remaining_groups": {
+      "test": 0.1,
+      "train": 0.8,
+      "val": 0.1
+    }
+  },
+  "templates": {
+    "active": "The {agent} {past} the {patient}.",
+    "passive": "The {patient} was {participle} by the {agent}."
+  },
+  "tokenizer": {
+    "add_special_tokens": false,
+    "backend_sha256": "a19b2602a5bdadad2bb67d1f7e655bc5db77892d506ca9df68ee5422a47a4578",
+    "name": "EleutherAI/pythia-6.9b",
+    "revision": "step143000"
+  },
+  "vocabulary": {
+    "nouns": [
+      "actor",
+      "artist",
+      "baby",
+      "boy",
+      "child",
+      "doctor",
+      "farmer",
+      "girl",
+      "king",
+      "man",
+      "nurse",
+      "queen",
+      "soldier",
+      "student",
+      "teacher",
+      "woman"
+    ],
+    "verbs": [
+      {
+        "lemma": "call",
+        "participle": "called",
+        "past": "called"
+      },
+      {
+        "lemma": "follow",
+        "participle": "followed",
+        "past": "followed"
+      },
+      {
+        "lemma": "help",
+        "participle": "helped",
+        "past": "helped"
+      },
+      {
+        "lemma": "kick",
+        "participle": "kicked",
+        "past": "kicked"
+      },
+      {
+        "lemma": "like",
+        "participle": "liked",
+        "past": "liked"
+      },
+      {
+        "lemma": "love",
+        "participle": "loved",
+        "past": "loved"
+      },
+      {
+        "lemma": "touch",
+        "participle": "touched",
+        "past": "touched"
+      },
+      {
+        "lemma": "watch",
+        "participle": "watched",
+        "past": "watched"
+      }
+    ]
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "counts": {
+    "excluded_pairs": 1,
+    "included_pairs": 1654,
+    "pairs_by_split": {
+      "gen_test": 356,
+      "test": 133,
+      "train": 1034,
+      "val": 131
+    },
+    "sentences": 3308,
+    "sentences_by_split": {
+      "gen_test": 712,
+      "test": 266,
+      "train": 2068,
+      "val": 262
+    },
+    "source_rows": 1655,
+    "triples_by_split": {
+      "gen_test": 338,
+      "test": 121,
+      "train": 961,
+      "val": 120
+    },
+    "unique_triples": 1540
+  },
+  "held_out_nouns": [
+    "bear",
+    "chicken",
+    "lion",
+    "horse",
+    "child",
+    "baby",
+    "dog",
+    "cat"
+  ],
+  "held_out_role_counts": {
+    "baby": {
+      "agent_pairs": 47,
+      "patient_pairs": 18
+    },
+    "bear": {
+      "agent_pairs": 13,
+      "patient_pairs": 9
+    },
+    "cat": {
+      "agent_pairs": 124,
+      "patient_pairs": 30
+    },
+    "chicken": {
+      "agent_pairs": 19,
+      "patient_pairs": 10
+    },
+    "child": {
+      "agent_pairs": 43,
+      "patient_pairs": 10
+    },
+    "dog": {
+      "agent_pairs": 65,
+      "patient_pairs": 21
+    },
+    "horse": {
+      "agent_pairs": 24,
+      "patient_pairs": 10
+    },
+    "lion": {
+      "agent_pairs": 21,
+      "patient_pairs": 13
+    }
+  },
+  "invalid_source_rows": [
+    {
+      "active_sentence": "A wolf stabbed Samuel.",
+      "pair_id": 962,
+      "passive_sentence": "A wolf Samuel is stabed.",
+      "reason": "source row 964: unsupported passive sentence: 'A wolf Samuel is stabed.'",
+      "source_row": 964
+    }
+  ],
+  "ratios_on_non_generalization_triples": {
+    "test": 0.1,
+    "train": 0.8,
+    "val": 0.1
+  },
+  "seed": 42,
+  "source": "datasets/active_passive_data_fullsent.csv"
+}

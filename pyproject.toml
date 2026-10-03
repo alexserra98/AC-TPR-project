@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ac-tpr"
+version = "0.1.0"
+description = "Controlled active/passive datasets for representation steering experiments"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "torch>=2.6,<2.8",
+    "transformers==5.9.0",
+    "transformer-lens==3.9.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+notebook = [
+    "ipykernel>=6,<8",
+    "matplotlib>=3.9,<4",
+    "nbclient>=0.10,<1",
+    "nbformat>=5.10,<6",
+    "pandas>=2.2,<3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ac_tpr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
