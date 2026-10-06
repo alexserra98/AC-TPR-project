@@ -1,0 +1,19 @@
+{
+  "baseline_dir": "/home/ldomenichelli/Workspace/AC-TPR-project/ac-tpr-cache/local-soft-tpr-v1/full-layer-curves/centroid",
+  "groups": 512,
+  "interpretation": "Positive differences mean stronger patient-directed steering, not factual QA accuracy",
+  "soft_tpr_dir": "/home/ldomenichelli/Workspace/AC-TPR-project/ac-tpr-cache/local-soft-tpr-v1/full-layer-curves/soft_tpr",
+  "source_sha256": {
+    "raw": {
+      "baseline.csv": "27af1dee0af98229220952352f02a5426070ab15daae519d2b98de91a79fc5aa",
+      "metadata.json": "67d431f23595b705424b0047eee2640ffc1f1e4f6a83c335e8f26b13d3ba215e",
+      "summary.csv": "75009cf5fd33d55780ad08f24d7ff8cf4e634f7e830e155860d1443f3dfb6201"
+    },
+    "soft_tpr": {
+      "baseline.csv": "27af1dee0af98229220952352f02a5426070ab15daae519d2b98de91a79fc5aa",
+      "metadata.json": "41d116aeabca6704b7b161e2af765a682a48c14db6f109064d4d47578ddb91d0",
+      "summary.csv": "790726cf8c6288cff58830504642f2b97813801cfc6fd3c85e0b465b830ccc53"
+    }
+  },
+  "uncertainty": "Descriptive paired-condition comparisons; no significance or best-layer claims"
+}

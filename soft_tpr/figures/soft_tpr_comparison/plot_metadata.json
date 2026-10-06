@@ -1,0 +1,10 @@
+{
+  "comparison": "Descriptive full-layer sweep; no held-out layer selection or significance claims",
+  "shared_answer_score_ylim": [
+    -1.1632174948926242,
+    0.6939463677450463
+  ],
+  "plot_script_sha256": "bef2b7f5a203345f8ee954ad65256463000cff947b91b44cf1945d4aa2d99d0b",
+  "maximum_absolute_mean_difference": 0.029687742017350083,
+  "mean_absolute_mean_difference": 0.0033396123561492
+}
