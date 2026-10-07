@@ -347,6 +347,8 @@ def run_interventions(
         "vectors_dir": str(vectors_dir.resolve()),
         "vectors_sha256": hashlib.sha256(vectors_path.read_bytes()).hexdigest(),
         "vectors_metadata_sha256": hashlib.sha256((vectors_dir / "metadata.json").read_bytes()).hexdigest(),
+        "vector_method": source.get("vector_method", "raw_role_means"),
+        "vector_training": source.get("soft_tpr"),
         "model": source["model"], "execution_model": execution_model,
         "tokenizer": source["tokenizer"], "activation_site": source["activation_site"],
         "hook_names": source["hook_names"], "scoring_hook": "unembed.hook_in",

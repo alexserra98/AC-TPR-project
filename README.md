@@ -425,6 +425,13 @@ post-intervention ties do not count as flips. Curves are descriptive means with
 no uncertainty intervals. The largest displayed effects are selected across the
 sweep and are not independently validated best settings.
 
+## Soft TPR experiment
+
+See [the reproduction guide](soft_tpr/README.md) for training the quantized
+TPR autoencoders, comparing reconstructed and raw centroids, running the AE/PCA
+controls, and regenerating the figures. Experiment entry points are in
+`scripts/temporary/`, with implementation in `src/ac_tpr/`.
+
 ## Tests
 
 ```bash
