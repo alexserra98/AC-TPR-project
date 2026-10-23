@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from importlib.metadata import version
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import torch
 import transformers
-from transformer_lens import HookedTransformer
+from nnsight import LanguageModel
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from ac_tpr.dataset import (
@@ -79,11 +80,11 @@ def tokenize_roles(
 
 @torch.inference_mode()
 def extract_batch(
-    model: HookedTransformer, inputs: dict[str, torch.Tensor], positions: torch.Tensor
+    model: LanguageModel, inputs: dict[str, torch.Tensor], positions: torch.Tensor
 ) -> torch.Tensor:
     """Return CPU states shaped [sentence, block, role, hidden].
 
-    Each hook reads the residual stream after a transformer block. Block indices
+    Each trace reads the residual stream after a transformer block. Block indices
     are zero-based; the last block is captured before final_layer_norm. Embedding
     states and the final normalized model output are not included.
     """
@@ -91,17 +92,14 @@ def extract_batch(
         raise ValueError("Extraction requires model.eval()")
     positions = positions.to(inputs["input_ids"].device)
     batch_indices = torch.arange(len(positions), device=positions.device)[:, None]
-    states = []
-
-    def capture(hidden, hook):
-        states.append(hidden[batch_indices, positions].cpu())
-
-    model.run_with_hooks(
-        inputs["input_ids"], attention_mask=inputs["attention_mask"],
-        prepend_bos=False, past_kv_cache=None, return_type=None,
-        fwd_hooks=[(BLOCK_HOOK.format(layer=layer), capture) for layer in range(model.cfg.n_layers)],
-    )
-    return torch.stack(states, dim=1)
+    with model.trace(inputs, use_cache=False) as tracer:
+        states = []
+        for layer in range(model.config.num_hidden_layers):
+            hidden = model.gpt_neox.layers[layer].output
+            states.append(hidden[batch_indices, positions].cpu())
+        result = torch.stack(states, dim=1).save()
+        tracer.stop()
+    return result
 
 
 def extract_activations(
@@ -118,6 +116,7 @@ def extract_activations(
     only after extraction and saving succeed, and marks a complete run. The full
     role tensor is kept in CPU memory (about 3.8 GiB for 3,840 rows in float32).
     """
+    started = time.monotonic()
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
     if dtype not in {"float16", "bfloat16", "float32"}:
@@ -144,11 +143,13 @@ def extract_activations(
     tokenizer.padding_side = "right"
     print(f"Loading {TOKENIZER_ID} at {TOKENIZER_REVISION} ({dtype}, {device})", flush=True)
     model, model_metadata = load_model(tokenizer, TOKENIZER_REVISION, device, dtype)
-    if max(map(len, input_ids)) > model.cfg.n_ctx:
+    if max(map(len, input_ids)) > model.config.max_position_embeddings:
         raise ValueError("A sentence exceeds the model context length")
     output_dir.mkdir(parents=True, exist_ok=False)
-    shape = (len(rows), model.cfg.n_layers, len(ROLES), model.cfg.d_model)
-    activations = torch.empty(shape, dtype=model.cfg.dtype)
+    if torch.device(device).type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    shape = (len(rows), model.config.num_hidden_layers, len(ROLES), model.config.hidden_size)
+    activations = torch.empty(shape, dtype=model.dtype)
     for start in range(0, len(rows), batch_size):
         end = min(start + batch_size, len(rows))
         inputs = tokenizer.pad(
@@ -171,6 +172,7 @@ def extract_activations(
     )
     metadata = {
         "schema_version": SCHEMA_VERSION,
+        "elapsed_seconds": time.monotonic() - started,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "corpus": str(corpus_path.resolve()),
         "corpus_sha256": hashlib.sha256(corpus_path.read_bytes()).hexdigest(),
@@ -186,22 +188,24 @@ def extract_activations(
             "pad_token_id": tokenizer.pad_token_id,
         },
         "activation_site": "Transformer block output, before final_layer_norm",
-        "hook_names": [BLOCK_HOOK.format(layer=layer) for layer in range(model.cfg.n_layers)],
-        "layer_indices": list(range(model.cfg.n_layers)),
+        "hook_names": [BLOCK_HOOK.format(layer=layer) for layer in range(model.config.num_hidden_layers)],
+        "layer_indices": list(range(model.config.num_hidden_layers)),
         "roles": ROLES,
         "axes": ["sentence", "layer", "role", "hidden"],
         "shape": list(shape),
         "sentences_by_split": dict(Counter(row["split"] for row in rows)),
         "sentences_by_voice": dict(Counter(row["voice"] for row in rows)),
         "batch_size": batch_size,
-        "device": str(model.cfg.device),
+        "device": str(model.device),
         "gpu": torch.cuda.get_device_name(device) if torch.device(device).type == "cuda" else None,
+        "peak_allocated_bytes": torch.cuda.max_memory_allocated(device) if torch.device(device).type == "cuda" else None,
+        "peak_reserved_bytes": torch.cuda.max_memory_reserved(device) if torch.device(device).type == "cuda" else None,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "versions": {
             "python": platform.python_version(),
             "torch": torch.__version__,
             "transformers": transformers.__version__,
-            "transformer_lens": version("transformer-lens"),
+            "nnsight": version("nnsight"),
             "cuda": torch.version.cuda,
         },
     }

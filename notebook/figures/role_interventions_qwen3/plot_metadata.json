@@ -1,0 +1,36 @@
+{
+  "run_directory": "/orfeo/cephfs/scratch/dssc/zenocosini/ac-tpr-cache/qwen3-8b-generated-agent-chat-nnsight/interventions",
+  "run_created_at": "2026-10-23T14:08:18.629668+00:00",
+  "model": {
+    "api": "LanguageModel",
+    "attention_implementation": "eager",
+    "backend": "nnsight",
+    "commit": "b968826d9c46dd6066d109eabc6255188de91218",
+    "dtype": "bfloat16",
+    "name": "Qwen/Qwen3-8B",
+    "nnsight_version": "0.7.0",
+    "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "transformers_version": "5.9.0",
+    "weight_processing": "none"
+  },
+  "execution_model": {
+    "api": "LanguageModel",
+    "attention_implementation": "eager",
+    "backend": "nnsight",
+    "commit": "b968826d9c46dd6066d109eabc6255188de91218",
+    "dtype": "bfloat16",
+    "name": "Qwen/Qwen3-8B",
+    "nnsight_version": "0.7.0",
+    "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "transformers_version": "5.9.0",
+    "weight_processing": "none"
+  },
+  "schema_version": 4,
+  "source_sha256": {
+    "metadata.json": "2cc7db3b4f73cea0e2e099ad5c898d1768871717448371a2c9bc6dd94ce47c20",
+    "baseline.csv": "2f83b080517f323cbc674a5de0063f2ec3217dcf988aa3a1855bc7c2c76543f5",
+    "summary.csv": "f366a9441aeef8607fdfe3850c5549a30bce5fe4520bdfdbaf2bbcd0b5f2743f"
+  },
+  "conditional_flip_rate": "agent_to_patient_flip_rate / baseline_agent_preference_rate",
+  "uncertainty": "Descriptive curves; no uncertainty intervals"
+}

@@ -17,15 +17,15 @@ export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
 
 experiment_root=/orfeo/scratch/dssc/zenocosini/ac-tpr-cache
-experiment_name=pythia-6.9b-step143000-generated-agent-tl3
+experiment_name=pythia-6.9b-step143000-generated-agent-nnsight
 experiment_args=(
     --corpus data/generated/corpus.csv
-    --vectors-dir "${experiment_root}/syntactic_vectors/pythia-6.9b-step143000-generated-train-tl3"
+    --vectors-dir "${experiment_root}/syntactic_vectors/pythia-6.9b-step143000-generated-train-nnsight"
     --splits test gen_test --batch-size 32 --device cuda --dtype float32
 )
 
 .venv/bin/python -u scripts/run_interventions.py "${experiment_args[@]}" \
-    --limit 8 --output-dir "${experiment_root}/interventions/pythia-6.9b-step143000-generated-agent-smoke-tl3"
+    --limit 8 --output-dir "${experiment_root}/interventions/pythia-6.9b-step143000-generated-agent-smoke-nnsight"
 
 .venv/bin/python -u scripts/run_interventions.py "${experiment_args[@]}" \
     --output-dir "${experiment_root}/interventions/${experiment_name}"

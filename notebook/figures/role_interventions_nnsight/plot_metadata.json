@@ -1,0 +1,36 @@
+{
+  "run_directory": "/orfeo/cephfs/scratch/dssc/zenocosini/ac-tpr-cache/interventions/pythia-6.9b-step143000-generated-agent-nnsight",
+  "run_created_at": "2026-10-22T11:08:59.344715+00:00",
+  "model": {
+    "api": "LanguageModel",
+    "attention_implementation": "eager",
+    "backend": "nnsight",
+    "commit": "21bfa02e806e253fe453702c29c81d9f83617255",
+    "dtype": "float32",
+    "name": "EleutherAI/pythia-6.9b",
+    "nnsight_version": "0.7.0",
+    "revision": "step143000",
+    "transformers_version": "5.9.0",
+    "weight_processing": "none"
+  },
+  "execution_model": {
+    "api": "LanguageModel",
+    "attention_implementation": "eager",
+    "backend": "nnsight",
+    "commit": "21bfa02e806e253fe453702c29c81d9f83617255",
+    "dtype": "float32",
+    "name": "EleutherAI/pythia-6.9b",
+    "nnsight_version": "0.7.0",
+    "revision": "step143000",
+    "transformers_version": "5.9.0",
+    "weight_processing": "none"
+  },
+  "schema_version": 4,
+  "source_sha256": {
+    "metadata.json": "b6c504f86024f725e8a7269f394ca0097741f1f6b1dda1323e6fbfc1d3985c31",
+    "baseline.csv": "069516755e044f21e67590cf12d18ec4ce3c7647f447c064b8ee7b59654f44d9",
+    "summary.csv": "4470017026d960fae4642fd77d7608eeb4ed67cc4c67223c8e1153a8d56bc5f8"
+  },
+  "conditional_flip_rate": "agent_to_patient_flip_rate / baseline_agent_preference_rate",
+  "uncertainty": "Descriptive curves; no uncertainty intervals"
+}

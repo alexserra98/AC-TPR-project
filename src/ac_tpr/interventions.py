@@ -13,12 +13,12 @@ from pathlib import Path
 
 import torch
 import transformers
-from transformer_lens import HookedTransformer
+from nnsight import LanguageModel
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from ac_tpr.activations import ROLES, tokenize_roles
 from ac_tpr.dataset import CORPUS_COLUMNS, TOKENIZER_ID, TOKENIZER_REVISION
-from ac_tpr.model import BLOCK_HOOK, SCHEMA_VERSION, load_model, validate_activation_provenance
+from ac_tpr.model import SCHEMA_VERSION, load_model, validate_activation_provenance
 from ac_tpr.syntactic_vectors import VOICES
 
 PROMPT_TEMPLATE = "{sentence}\nQuestion: Who is performing the action?\nAnswer:"
@@ -35,16 +35,18 @@ GROUP_COLUMNS = ["split", "voice", "layer", "mean_type", "edited_role"]
 
 
 def prepare_prompts(
-    rows: list[dict[str, str]], tokenizer: PreTrainedTokenizerFast
+    rows: list[dict[str, str]], tokenizer: PreTrainedTokenizerFast,
+    prompt_template: str = PROMPT_TEMPLATE,
 ) -> tuple[list[list[int]], torch.Tensor, torch.Tensor]:
     """Return prompt IDs, sentence role positions, and single-token answer IDs.
 
     Roles and candidate answers are ordered [agent, patient]. Candidate answers
     include one leading space. Their tokenization must append exactly one token
     to the prompt, and the sentence must remain an unchanged token prefix.
+    The template uses {sentence} for the unchanged corpus sentence.
     """
     sentence_ids, positions = tokenize_roles(rows, tokenizer)
-    prompts = [PROMPT_TEMPLATE.format(sentence=row["sentence"]) for row in rows]
+    prompts = [prompt_template.format(sentence=row["sentence"]) for row in rows]
     prompt_ids = tokenizer(prompts, add_special_tokens=False)["input_ids"]
     answers = []
     for row, prompt, tokens, prefix in zip(rows, prompts, prompt_ids, sentence_ids, strict=True):
@@ -81,13 +83,13 @@ def role_deltas(
 
 @torch.inference_mode()
 def score_batch(
-    model: HookedTransformer, inputs: dict[str, torch.Tensor], answer_ids: torch.Tensor,
+    model: LanguageModel, inputs: dict[str, torch.Tensor], answer_ids: torch.Tensor,
     layer: int | None = None, positions: torch.Tensor | None = None,
     deltas: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return CPU float32 [agent, patient] logits at each last non-padding token.
 
-    Inputs use right padding. An optional hook translates one sentence token per
+    Inputs use right padding. An optional trace edit translates one sentence token per
     row after the selected block; other tokens and block outputs are preserved.
     Updates use float32 arithmetic and are cast back to the residual dtype.
     """
@@ -100,38 +102,30 @@ def score_batch(
     answer_ids = answer_ids.to(device)
     if answer_ids.shape != (len(batch), len(ROLES)):
         raise ValueError("Answer IDs must have shape [batch, 2]")
-    def select_answer_position(hidden, hook):
-        return hidden[batch, last][:, None, :]
-
-    hooks = [("unembed.hook_in", select_answer_position)]
     if layer is None:
         if positions is not None or deltas is not None:
             raise ValueError("An edit requires a layer, positions, and deltas together")
     else:
-        if not 0 <= layer < model.cfg.n_layers:
+        if not 0 <= layer < model.config.num_hidden_layers:
             raise ValueError("Intervention layer is outside the model")
         if positions is None or deltas is None:
             raise ValueError("An edit requires a layer, positions, and deltas together")
         positions, deltas = positions.to(device), deltas.to(device=device, dtype=torch.float32)
-        if positions.shape != (len(batch),) or deltas.shape != (len(batch), model.cfg.d_model):
+        if positions.shape != (len(batch),) or deltas.shape != (len(batch), model.config.hidden_size):
             raise ValueError("Edit positions or deltas have incompatible shapes")
         if ((positions < 0) | (positions >= last)).any():
             raise ValueError("Edited tokens must precede the final prompt token")
 
-        def translate(hidden, hook):
-            hidden = hidden.clone()
+    with model.trace(inputs, use_cache=False):
+        if layer is not None:
+            hidden = model.gpt_neox.layers[layer].output.clone()
             updated = (hidden[batch, positions].float() + deltas).to(hidden.dtype)
             if not torch.isfinite(updated).all():
                 raise ValueError("Nonfinite edited activations")
             hidden[batch, positions] = updated
-            return hidden
-
-        hooks.append((BLOCK_HOOK.format(layer=layer), translate))
-    logits = model.run_with_hooks(
-        inputs["input_ids"], attention_mask=inputs["attention_mask"],
-        prepend_bos=False, past_kv_cache=None, fwd_hooks=hooks,
-    )
-    scores = logits[:, 0].gather(1, answer_ids).float().cpu()
+            model.gpt_neox.layers[layer].output = hidden
+        model.embed_out.input = model.embed_out.input[batch, last][:, None, :]
+        scores = model.output.logits[:, 0].gather(1, answer_ids).float().cpu().save()
     if not torch.isfinite(scores).all():
         raise ValueError("Nonfinite answer logits")
     return scores
@@ -259,7 +253,7 @@ def run_interventions(
     input_ids, positions, answer_ids = prepare_prompts(rows, tokenizer)
     print(f"Loading {TOKENIZER_ID} at {TOKENIZER_REVISION} ({dtype}, {device})", flush=True)
     model, execution_model = load_model(tokenizer, source["model"]["commit"], device, dtype)
-    layers, hidden = model.cfg.n_layers, model.cfg.d_model
+    layers, hidden = model.config.num_hidden_layers, model.config.hidden_size
     if execution_model["commit"] != source["model"]["commit"]:
         raise ValueError("Loaded model commit does not match vector provenance")
     if (
@@ -268,10 +262,12 @@ def run_interventions(
         or vectors["by_voice"].shape != (2, layers, 2, hidden)
     ):
         raise ValueError("Vector layer or hidden dimensions do not match the model")
-    if max(map(len, input_ids)) > model.cfg.n_ctx:
+    if max(map(len, input_ids)) > model.config.max_position_embeddings:
         raise ValueError("A prompt exceeds the model context length")
 
     output_dir.mkdir(parents=True, exist_ok=False)
+    if torch.device(device).type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     result_count = 0
     with (
         (output_dir / "baseline.csv").open("w", newline="", encoding="utf-8") as base_handle,
@@ -349,7 +345,7 @@ def run_interventions(
         "vectors_metadata_sha256": hashlib.sha256((vectors_dir / "metadata.json").read_bytes()).hexdigest(),
         "model": source["model"], "execution_model": execution_model,
         "tokenizer": source["tokenizer"], "activation_site": source["activation_site"],
-        "hook_names": source["hook_names"], "scoring_hook": "unembed.hook_in",
+        "hook_names": source["hook_names"], "scoring_hook": "embed_out.input",
         "prompt_template": PROMPT_TEMPLATE, "answer_prefix": " ",
         "original_answer": "agent", "counterfactual_answer": "patient",
         "logit_diff": "patient_logit - agent_logit",
@@ -370,12 +366,14 @@ def run_interventions(
         "sentences_by_voice": dict(Counter(row["voice"] for row in rows)),
         "baseline_rows": len(rows), "result_rows": result_count, "summary_rows": summary_count,
         "controls": {"zero_vector_first_batch": "passed", "final_block_all_rows": "passed"},
-        "batch_size": batch_size, "device": str(model.cfg.device),
+        "batch_size": batch_size, "device": str(model.device),
         "gpu": torch.cuda.get_device_name(device) if torch.device(device).type == "cuda" else None,
+        "peak_allocated_bytes": torch.cuda.max_memory_allocated(device) if torch.device(device).type == "cuda" else None,
+        "peak_reserved_bytes": torch.cuda.max_memory_reserved(device) if torch.device(device).type == "cuda" else None,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "versions": {"python": platform.python_version(), "torch": torch.__version__,
                      "transformers": transformers.__version__,
-                     "transformer_lens": version("transformer-lens"), "cuda": torch.version.cuda},
+                     "nnsight": version("nnsight"), "cuda": torch.version.cuda},
     }
     (output_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"

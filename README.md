@@ -10,7 +10,7 @@ is the agent in both “The boy helped the girl.” and “The girl was helped b
 
 ## Environment
 
-Run commands from the repository root. The project uses Python 3.11.14 and `uv`, with TransformerLens 3.9.0,
+Run commands from the repository root. The project uses Python 3.11.14 and `uv`, with NNsight 0.7.0,
 Transformers 5.9.0, and Torch 2.7.1 pinned in the lockfile.
 Keep dependency and Hugging Face caches on scratch storage:
 
@@ -26,64 +26,76 @@ uv sync --locked
 filesystems. Set these variables in each shell or Slurm job that runs the tools.
 Dataset generation uses the CPU and downloads only tokenizer files.
 
-### Classic TransformerLens implementation
+### Local NNsight implementation
 
-The model uses TransformerLens 3.9.0's `HookedTransformer.from_pretrained_no_processing`
-with the exact Hugging Face checkpoint commit. LayerNorm folding, weight centering,
-value-bias folding, and attention-matrix refactoring are disabled. The fast tokenizer,
-right padding, explicit attention masks, and absence of BOS/EOS insertion are unchanged.
-Extraction and edits use `blocks.{layer}.hook_resid_post`. Scoring uses `unembed.hook_in`
-to send only the final non-padding position to the language-model head.
+The loader resolves `EleutherAI/pythia-6.9b` at `step143000` to its exact
+Hugging Face checkpoint commit and wraps the raw causal model with NNsight
+`LanguageModel`. It uses eager attention in evaluation mode with frozen weights.
+The supplied fast tokenizer, right padding, explicit attention masks, and absence
+of BOS/EOS insertion are preserved. Every trace disables KV caching.
 
-The default dtype is **float32**. Classic attention computes QK explicitly and can
-overflow in float16; its softmax implementation can then replace NaNs with zeros.
-The loader rejects float16 for this checkpoint. Float32 avoids that failure without
-an attention-method override. Q/K/V, score, and pattern hooks remain available.
-The GPU comparison used about 26.3 GiB of allocated memory on a 32 GiB V100.
+Extraction and edits use `model.gpt_neox.layers[layer].output`, before final
+normalization. These outputs are tensors with the pinned Transformers version.
+Extraction saves only agent/patient states to CPU and stops after the last block,
+without projecting vocabulary logits. Scoring reduces `model.embed_out.input`
+to the last non-padding token of each sentence before the vocabulary projection.
+Edits are local to each trace; subsequent calls start from the unedited model.
 
-Activation, vector, and intervention metadata use `schema_version: 3`. The pipeline
-requires the classic API, its canonical hooks, raw weights, and the installed
-TransformerLens version. Regenerate schema-2 Bridge artifacts before consuming them.
-New directories end in `-tl3`; previous HF and `-tl4` runs remain available.
+The default dtype is **float32**. The existing float16 restriction is retained
+because eager query/key products can overflow. This migration does not add
+reduced-precision validation, remote NDIF execution, or attention-internal hooks.
+
+Activation, vector, and intervention metadata use `schema_version: 4`. Consumers
+require the NNsight backend, canonical activation sites, raw weights, eager
+attention, and matching installed NNsight and Transformers versions. Historical
+artifacts must be regenerated. Tensor layouts and CSV columns are unchanged.
 Intervention metadata preserves extraction provenance under `model` and records
-execution provenance separately under `execution_model`.
+execution provenance separately under `execution_model`. Extraction and scoring
+metadata record elapsed time and peak GPU memory.
 
 ### Validation and regeneration
 
-The saved pre-migration reference is in `ac-tpr-cache/migration-reference-tl4`.
-Its tiny model uses float32; the real-checkpoint reference uses float16.
-The CPU comparison retains `rtol=1e-5, atol=1e-6`. The GPU comparison with the old
-float16 run is descriptive because the execution precision has changed. An
-independent HF float32 run checks the same checkpoint, token batches, role vectors,
-and all 128 layer/mean/role conditions.
+CPU tests compare independent, identically weighted Hugging Face and NNsight
+models with eager attention (`rtol=1e-5, atol=1e-6`). The migration comparison also
+reuses the saved TL3 float32 outputs, reference token batches, and role vectors.
+The real-checkpoint comparison covers all 128 layer/mean/role conditions.
+Activation bounds remain `rtol=1e-4, atol=5e-4`, with relative RMS below `1e-5`;
+score bounds remain `rtol=1e-4, atol=1e-4`. Zero-vector and final-block controls
+require exact equality. A failed comparison stops regeneration.
+
+The NNsight migration passed 101 CPU tests and the saved CPU/GPU comparisons.
+On the A100 reference run, activation relative RMS error against TL3 was
+`6.98e-6`; the maximum change in candidate logit difference was `4.82e-4`,
+with no preference changes in the eight reference rows. The 128-condition
+comparison took 20.2 seconds after loading and used 25.6 GiB of allocated GPU
+memory. Hardware differs from the historical V100 run, so this is not a
+controlled performance comparison.
+
+Full regeneration completed for all 3,840 sentences, 1,688 training examples,
+and 1,940 evaluation sentences (248,320 intervention rows). The full sweep took
+63.7 minutes on the A100 and peaked at 25.7 GiB of allocated GPU memory. Both
+notebooks were executed and the NNsight figures exported.
 
 ```bash
-HF_HUB_OFFLINE=1 OMP_NUM_THREADS=2 .venv/bin/python scripts/temporary/compare_transformerlens.py \
-  --output-dir ac-tpr-cache/migration-comparison-tl3-cpu
-sbatch scripts/slurm/temporary/compare_transformerlens.sh
-# After the classic GPU comparison finishes:
-sbatch scripts/slurm/temporary/compare_classic_hf.sh
-# After the independent HF comparison finishes:
-.venv/bin/python scripts/temporary/review_tl3_comparison.py
-sbatch scripts/slurm/temporary/regenerate_tl3.sh
+HF_HUB_OFFLINE=1 OMP_NUM_THREADS=2 .venv/bin/python scripts/temporary/compare_nnsight.py \
+  --output-dir ac-tpr-cache/migration-comparison-nnsight-cpu
+sbatch scripts/slurm/temporary/compare_nnsight.sh
+# After both comparisons pass:
+sbatch scripts/slurm/temporary/regenerate_nnsight.sh
 ```
 
-All output directories must be new. The regeneration wrapper requires
-`ac-tpr-cache/migration-validation-tl3.json` to pass with the installed version.
-It runs extraction, training-role averaging, the smoke test, and the full sweep.
-After completion, execute the analysis notebook as described below.
+All run directories must be new. The regeneration wrapper checks both comparison
+reports against the installed package versions, writes
+`ac-tpr-cache/migration-validation-nnsight.json`, and runs full extraction,
+training-role averaging, an 8-row smoke test, and the full intervention sweep.
+It then executes both analysis notebooks; install the notebook dependencies with
+`uv sync --locked --group notebook` before running it.
 
-The 8-row GPU check had a maximum candidate-logit difference of 0.00047 against
-HF float32. Activation relative RMS error was 0.00066%. The final activation
-bounds are `rtol=1e-4, atol=5e-4` plus relative RMS below `1e-5`; score bounds
-remain `rtol=1e-4, atol=1e-4`. The initial stricter activation check failed on
-0.2% of entries; that report is preserved. Zero-vector and final-block controls
-still require exact equality. Against the old float16 run, the maximum change
-in the candidate logit difference was 0.256, with no preference changes in the
-sample. These are numerical comparisons, not a claim of bitwise equivalence.
-
-The earlier TL4 migration's exact-match report remains at
-`ac-tpr-cache/migration-artifact-comparison-tl4.json`.
+New experiment directories end in `-nnsight`. Previous HF, `-tl4`, and `-tl3`
+outputs are retained. Earlier migration/debug scripts are historical and require
+the corresponding historical checkout and environment; they are not part of the
+current workflow. The current comparison reads their saved tensors without
+requiring TransformerLens.
 
 ## Generate the starter corpus
 
@@ -173,7 +185,7 @@ Run on a GPU allocation after installing the locked environment:
 ```bash
 uv run --locked scripts/extract_activations.py \
   --corpus data/generated/corpus.csv \
-  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/activations/pythia-6.9b-step143000-generated-tl3 \
+  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/activations/pythia-6.9b-step143000-generated-nnsight \
   --batch-size 32 --device cuda --dtype float32
 ```
 
@@ -187,9 +199,10 @@ Saved states are the residual stream **after each transformer block**, indexed
 0–31. All blocks are captured before the model's final layer normalization,
 including block 31. These are the corresponding block output sites for later
 interventions. Embeddings and final normalized states are excluded. Extraction
-uses TransformerLens `HookedTransformer` with raw Hugging Face weights, explicit
-float32 attention, and evaluation mode. Gradients and the KV cache are disabled.
-Both extraction and intervention use `blocks.{layer}.hook_resid_post`; weight processing is disabled. Inputs are explicit token tensors without BOS insertion.
+uses NNsight `LanguageModel` with raw Hugging Face weights, eager float32
+attention, and evaluation mode. Gradients and the KV cache are disabled. Both
+extraction and intervention use `gpt_neox.layers.{layer}.output`. Inputs are
+explicit token tensors without BOS insertion.
 
 The new output directory contains:
 
@@ -215,7 +228,7 @@ Load the saved dictionary with:
 from pathlib import Path
 import torch
 
-run = Path("/orfeo/scratch/dssc/zenocosini/ac-tpr-cache/activations/pythia-6.9b-step143000-generated-tl3")
+run = Path("/orfeo/scratch/dssc/zenocosini/ac-tpr-cache/activations/pythia-6.9b-step143000-generated-nnsight")
 assert (run / "metadata.json").exists(), "Extraction is incomplete"
 data = torch.load(run / "activations.pt", map_location="cpu", weights_only=True, mmap=True)
 train_indices = [i for i, row in enumerate(data["rows"]) if row["split"] == "train"]
@@ -247,8 +260,8 @@ Compute agent/patient means from a completed activation extraction on CPU:
 
 ```bash
 OMP_NUM_THREADS=2 uv run --locked scripts/extract_syntactic_vectors.py \
-  --activations-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/activations/pythia-6.9b-step143000-generated-tl3 \
-  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/syntactic_vectors/pythia-6.9b-step143000-generated-train-tl3
+  --activations-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/activations/pythia-6.9b-step143000-generated-nnsight \
+  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/syntactic_vectors/pythia-6.9b-step143000-generated-train-nnsight
 ```
 
 The script uses only rows with `split == "train"`: 1,688 sentences in the generated
@@ -288,7 +301,7 @@ Load the means with:
 from pathlib import Path
 import torch
 
-run = Path("/orfeo/scratch/dssc/zenocosini/ac-tpr-cache/syntactic_vectors/pythia-6.9b-step143000-generated-train-tl3")
+run = Path("/orfeo/scratch/dssc/zenocosini/ac-tpr-cache/syntactic_vectors/pythia-6.9b-step143000-generated-train-nnsight")
 assert (run / "metadata.json").exists(), "Vector extraction is incomplete"
 vectors = torch.load(run / "syntactic_vectors.pt", map_location="cpu", weights_only=True)
 pooled_agent_layer_0 = vectors["pooled"][0, 0]
@@ -302,8 +315,8 @@ Run on a GPU allocation with the checkpoint already cached:
 ```bash
 uv run --locked scripts/run_interventions.py \
   --corpus data/generated/corpus.csv \
-  --vectors-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/syntactic_vectors/pythia-6.9b-step143000-generated-train-tl3 \
-  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/interventions/pythia-6.9b-step143000-generated-agent-tl3 \
+  --vectors-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/syntactic_vectors/pythia-6.9b-step143000-generated-train-nnsight \
+  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/interventions/pythia-6.9b-step143000-generated-agent-nnsight \
   --splits test gen_test --batch-size 32 --device cuda --dtype float32
 ```
 
@@ -332,10 +345,11 @@ pass and changes one noun token:
 - `edited_role=patient`: add `mu_agent - mu_patient` at the patient token.
 
 The edit has strength 1, uses float32 arithmetic, and is cast back to the residual
-dtype. TransformerLens hooks act on block outputs before final normalization and are
-removed after each forward pass, including failures. The model uses classic attention in evaluation mode, with gradients
-and KV caching disabled. The `unembed.hook_in` hook selects the final non-padding state before the
-language-model head, so it processes one position per sentence. GPU scoring defaults to float32; `--dtype float32 --device
+dtype. NNsight edits act on block outputs before final normalization and are
+confined to one trace, including when a forward fails. The model uses eager
+attention in evaluation mode, with gradients and KV caching disabled. Assigning
+`embed_out.input` selects the final non-padding state before the language-model
+head, so it processes one position per sentence. GPU scoring defaults to float32; `--dtype float32 --device
 cpu` supports small-model checks. `--limit N` selects the first N matching rows
 in corpus order for smoke runs.
 
@@ -383,7 +397,7 @@ sbatch scripts/slurm/temporary/run_generated_interventions.sh
 Submit from the repository root after installing the locked environment and
 caching the checkpoint as described above. The wrapper requests one V100, four
 CPU cores, 96 GiB RAM, and four hours. It runs eight selected sentences through
-every condition and layer, saving to a directory ending in `-agent-smoke-tl3`. Only a
+every condition and layer, saving to a directory ending in `-agent-smoke-nnsight`. Only a
 successful smoke run starts the full evaluation. Both runs use the same fixed
 prompt and settings. Logs go to
 `/orfeo/scratch/dssc/zenocosini/ac-tpr-cache/intervene-<job_id>.log`.
@@ -415,9 +429,9 @@ PY
 ```
 
 Each run saves PNG and PDF figures, baseline statistics, descriptive peak
-conditions, and source hashes under `notebook/figures/role_interventions_tl3/`.
-Start with the [logit-change plot](notebook/figures/role_interventions_tl3/logit_change.png)
-or its [vector PDF](notebook/figures/role_interventions_tl3/logit_change.pdf).
+conditions, and source hashes under `notebook/figures/role_interventions_nnsight/`.
+Start with the [logit-change plot](notebook/figures/role_interventions_nnsight/logit_change.png)
+or its [vector PDF](notebook/figures/role_interventions_nnsight/logit_change.pdf).
 
 The conditional flip plot divides the saved all-sentence flip rate by the
 baseline agent preference rate. Its denominator is therefore baseline agent wins;
@@ -433,9 +447,9 @@ uv run --locked pytest
 
 Tests cover sentence roles and irregular verbs, split isolation and balance,
 reproducibility, input errors, and tokenization using the real Pythia tokenizer.
-Activation tests compare a small random GPT-NeoX model and a classic
-HookedTransformer with identical weights on CPU to check role positions,
-padding, block outputs before final normalization, cleanup of hooks, and saved
+Activation tests compare independent small GPT-NeoX models with identical
+weights, one wrapped by NNsight, to check role positions, padding, block outputs
+before final normalization, recovery after failed traces, and saved
 artifacts including a short final batch. They do not download model weights.
 The tokenizer must be cached or downloadable. With it cached, tests also run with
 `HF_HUB_OFFLINE=1 uv run --locked pytest`.
@@ -445,13 +459,14 @@ unequal voice counts, exclusion of held-out rows, float32 precision, ordering,
 provenance, and rejection of incomplete or incompatible source artifacts.
 
 Intervention tests compare a small random GPT-NeoX causal model with a matching
-classic HookedTransformer to check candidate
+NNsight `LanguageModel` to check candidate
 tokenization, padded scoring against the full language-model output, voice-specific
-means, edit direction and position, hook cleanup, zero-vector and final-block
+means, edit direction and position, trace isolation, zero-vector and final-block
 controls, output arithmetic, summaries, and incompatible-input failures.
-Loader tests cover checkpoint pinning, raw-weight provenance, float16 rejection, large float32 query/key values,
-and working Q/K/V and attention-pattern hooks. Scoring tests verify that
-the language-model head receives only one position per sentence.
+Loader tests cover checkpoint pinning, raw-weight and package-version provenance,
+float16 rejection, and large float32 query/key values. Tests also cover custom
+prompts, extraction stopping before vocabulary projection, and scoring projecting
+only one position per sentence.
 
 ## Layout
 

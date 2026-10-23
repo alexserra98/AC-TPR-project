@@ -9,38 +9,32 @@ from ac_tpr.dataset import TOKENIZER_ID, TOKENIZER_REVISION
 from ac_tpr.model import load_model, validate_activation_provenance
 
 
-def test_loader_pins_commit_and_preserves_input_tokenizer(tokenizer, model, hf_model, monkeypatch):
+def test_loader_pins_commit_and_preserves_input_tokenizer(tokenizer, hf_model, monkeypatch):
     calls = []
-    config = hf_model.config
     before = tokenizer.backend_tokenizer.to_str()
 
     def boot(name, **kwargs):
         calls.append((name, kwargs))
-        return model
+        return copy.deepcopy(hf_model)
 
-    monkeypatch.setattr("ac_tpr.model.AutoConfig.from_pretrained", lambda *a, **kw: config)
-    monkeypatch.setattr("ac_tpr.model.HookedTransformer.from_pretrained_no_processing", boot)
-    actual, provenance = load_model(tokenizer, TOKENIZER_REVISION, "cpu", "float32")
-    assert actual is model
-    assert calls[0][0] == TOKENIZER_ID
-    assert calls[0][1]["revision"] == "test-commit"
-    assert calls[0][1]["dtype"] == torch.float32
-    assert calls[0][1]["hf_model"].config._commit_hash == "test-commit"
-    assert calls[0][1]["default_prepend_bos"] is False
-    assert calls[0][1]["default_padding_side"] == "right"
-    assert calls[0][1]["n_devices"] == 1
-    assert tokenizer.init_kwargs["revision"] == TOKENIZER_REVISION
+    monkeypatch.setattr("ac_tpr.model.AutoConfig.from_pretrained", lambda *a, **kw: hf_model.config)
+    monkeypatch.setattr("ac_tpr.model.AutoModelForCausalLM.from_pretrained", boot)
+    model, provenance = load_model(tokenizer, TOKENIZER_REVISION, "cpu", "float32")
+    assert calls == [(TOKENIZER_ID, {"revision": "test-commit", "dtype": torch.float32,
+                                  "attn_implementation": "eager"})]
+    assert model.tokenizer is tokenizer
     assert tokenizer.backend_tokenizer.to_str() == before
+    assert tokenizer.padding_side == "right"
     assert provenance["commit"] == "test-commit"
-    assert provenance["attention_implementation"] == "hooked_transformer_eager"
-    assert provenance["api"] == "HookedTransformer"
+    assert provenance["attention_implementation"] == "eager"
+    assert provenance["api"] == "LanguageModel"
     assert provenance["weight_processing"] == "none"
+    assert model.config is model._model.config
     assert not model.training
-    assert not model.cfg.default_prepend_bos
     assert all(not parameter.requires_grad for parameter in model.parameters())
 
 
-@pytest.mark.parametrize("schema", [None, 1, 2, 4])
+@pytest.mark.parametrize("schema", [None, 1, 2, 3, 5])
 def test_old_or_unknown_schema_requires_regeneration(schema):
     source = {} if schema is None else {"schema_version": schema}
     with pytest.raises(ValueError, match="Regenerate"):
@@ -52,28 +46,14 @@ def test_pythia_float16_is_rejected_before_loading(tokenizer):
         load_model(tokenizer, TOKENIZER_REVISION, "cpu", "float16")
 
 
-def test_attention_internals_remain_hookable(model):
-    captured = {}
-
-    def capture(value, hook):
-        captured[hook.name] = value.shape
-
-    names = [f"blocks.0.attn.hook_{name}" for name in ("q", "k", "v", "attn_scores", "pattern")]
-    model.run_with_hooks(torch.tensor([[1, 2, 3]]), prepend_bos=False,
-                         fwd_hooks=[(name, capture) for name in names])
-    assert set(captured) == set(names)
-    assert captured["blocks.0.attn.hook_q"] == (1, 3, 4, 8)
-    assert captured["blocks.0.attn.hook_pattern"] == (1, 4, 3, 3)
-
-
 @pytest.mark.parametrize("field,value", [
     ("backend", "transformers"), ("api", "TransformerBridge"),
-    ("weight_processing", "centered"), ("transformer_lens_version", "4.0.0"),
+    ("weight_processing", "centered"), ("nnsight_version", "0.0.0"), ("transformers_version", "0.0.0"),
     ("attention_implementation", "sdpa"),
 ])
 def test_incompatible_processing_is_rejected(model_metadata, field, value):
-    source = {"schema_version": 3, "model": copy.deepcopy(model_metadata),
-              "layer_indices": [0, 1], "hook_names": ["blocks.0.hook_resid_post", "blocks.1.hook_resid_post"]}
+    source = {"schema_version": 4, "model": copy.deepcopy(model_metadata),
+              "layer_indices": [0, 1], "hook_names": ["gpt_neox.layers.0.output", "gpt_neox.layers.1.output"]}
     source["model"][field] = value
     with pytest.raises(ValueError, match="raw weights"):
         validate_activation_provenance(source)
@@ -89,6 +69,7 @@ def test_float32_attention_handles_large_queries_and_keys(hf_model, tokenizer, m
     mask = torch.tensor([[1, 1, 1], [1, 1, 0]])
     with torch.inference_mode():
         expected = hf_model(tokens, attention_mask=mask, use_cache=False).logits
-        actual = model(tokens, attention_mask=mask, prepend_bos=False)
+        with model.trace({"input_ids": tokens, "attention_mask": mask}, use_cache=False):
+            actual = model.output.logits.save()
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)

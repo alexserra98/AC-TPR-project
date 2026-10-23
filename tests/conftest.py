@@ -1,4 +1,4 @@
-"""Small matched Hugging Face and TransformerLens models for CPU checks."""
+"""Small matched Hugging Face and NNsight models for CPU checks."""
 
 import copy
 from importlib.metadata import version
@@ -28,7 +28,7 @@ def hf_model(tokenizer):
         num_hidden_layers=2, num_attention_heads=4, max_position_embeddings=32,
         hidden_dropout=0.0, attention_dropout=0.0,
     )
-    config._attn_implementation = "sdpa"
+    config._attn_implementation = "eager"
     config._commit_hash = "test-commit"
     config.architectures = ["GPTNeoXForCausalLM"]
     return GPTNeoXForCausalLM(config).eval()
@@ -46,7 +46,7 @@ def model(tokenizer, hf_model, monkeypatch):
 def model_metadata():
     return {
         "name": TOKENIZER_ID, "revision": TOKENIZER_REVISION, "commit": "test-commit",
-        "dtype": "float32", "attention_implementation": "hooked_transformer_eager",
-        "backend": "transformer_lens", "api": "HookedTransformer",
-        "transformer_lens_version": version("transformer-lens"), "weight_processing": "none",
+        "dtype": "float32", "attention_implementation": "eager",
+        "backend": "nnsight", "api": "LanguageModel",
+        "nnsight_version": version("nnsight"), "transformers_version": version("transformers"), "weight_processing": "none",
     }

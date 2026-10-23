@@ -1,0 +1,5 @@
+split,voice,layer,mean_type,edited_role,mean_logit_diff_change,intervened_patient_preference_rate,conditional_flip_rate
+test,active,24,by_voice,agent,0.525695875005902,0.6132075471698113,0.24074074074074062
+test,passive,25,pooled,patient,0.6153598956342013,0.490566037735849,0.23943661971830982
+gen_test,active,24,by_voice,agent,0.631348075138198,0.6793981481481481,0.33414043583535114
+gen_test,passive,20,by_voice,agent,0.6245276533343174,0.5879629629629629,0.35934664246823944

@@ -50,20 +50,33 @@ def test_batched_hooks_match_individual_residual_states(rows, tokenizer, model, 
         ])
         torch.testing.assert_close(actual[index], expected, atol=1e-6, rtol=1e-5)
         assert not torch.allclose(actual[index, -1], output.last_hidden_state[0, positions[index]])
-    assert all(not hook.fwd_hooks for hook in model.hook_dict.values())
+    torch.testing.assert_close(extract_batch(model, batch_inputs, positions), actual, rtol=0, atol=0)
 
 
-def test_hooks_are_removed_after_forward_failure(rows, tokenizer, model, monkeypatch):
+def test_trace_failure_does_not_affect_next_extraction(rows, tokenizer, model, monkeypatch):
     ids, positions = tokenize_roles(rows, tokenizer)
     inputs = tokenizer.pad({"input_ids": ids}, padding=True, return_tensors="pt")
+    baseline = extract_batch(model, inputs, positions)
 
     def fail_forward(*args, **kwargs):
         raise RuntimeError("forward failed")
 
-    monkeypatch.setattr(model, "forward", fail_forward)
-    with pytest.raises(RuntimeError, match="forward failed"):
-        extract_batch(model, inputs, positions)
-    assert all(not hook.fwd_hooks for hook in model.hook_dict.values())
+    with monkeypatch.context() as patch:
+        patch.setattr(model.gpt_neox.layers[1]._module, "forward", fail_forward)
+        with pytest.raises(RuntimeError, match="forward failed"):
+            extract_batch(model, inputs, positions)
+    torch.testing.assert_close(extract_batch(model, inputs, positions), baseline, rtol=0, atol=0)
+
+
+def test_extraction_stops_before_vocabulary_projection(rows, tokenizer, model, monkeypatch):
+    ids, positions = tokenize_roles(rows, tokenizer)
+    inputs = tokenizer.pad({"input_ids": ids}, padding=True, return_tensors="pt")
+
+    def fail_projection(*args, **kwargs):
+        raise AssertionError("Extraction must not project vocabulary logits")
+
+    monkeypatch.setattr(model.embed_out._module, "forward", fail_projection)
+    assert extract_batch(model, inputs, positions).shape == (4, 2, 2, 32)
 
 
 @pytest.mark.parametrize("problem", ["missing", "duplicate", "multitoken"])
@@ -94,8 +107,8 @@ def test_extraction_roundtrip_and_partial_batch(tmp_path, rows, tokenizer, model
     assert metadata["shape"] == [3, 2, 2, 32]
     assert metadata["roles"] == ["agent", "patient"]
     assert metadata["layer_indices"] == [0, 1]
-    assert metadata["schema_version"] == 3
-    assert metadata["hook_names"] == ["blocks.0.hook_resid_post", "blocks.1.hook_resid_post"]
+    assert metadata["schema_version"] == 4
+    assert metadata["hook_names"] == ["gpt_neox.layers.0.output", "gpt_neox.layers.1.output"]
     assert metadata["sentences_by_voice"] == {"active": 2, "passive": 1}
     assert metadata["model"]["revision"] == TOKENIZER_REVISION
     assert json.loads((output_dir / "metadata.json").read_text()) == metadata

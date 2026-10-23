@@ -46,8 +46,8 @@ def source_run(tmp_path, rows, tokenizer, model, model_metadata, monkeypatch):
         "by_voice": torch.randn((2, 2, 2, 32), generator=generator),
     }, vectors_dir / "syntactic_vectors.pt")
     metadata = {
-        "schema_version": 3,
-        "hook_names": ["blocks.0.hook_resid_post", "blocks.1.hook_resid_post"],
+        "schema_version": 4,
+        "hook_names": ["gpt_neox.layers.0.output", "gpt_neox.layers.1.output"],
         "split": "train", "sentences": 4, "sentences_by_voice": {"active": 2, "passive": 2},
         "corpus_sha256": hashlib.sha256(corpus.read_bytes()).hexdigest(),
         "model": model_metadata,
@@ -100,30 +100,37 @@ def test_scores_match_full_lm_and_unpadded_forwards(model, hf_model, inputs):
     last = batch_inputs["attention_mask"].sum(dim=1) - 1
     with torch.inference_mode():
         full = hf_model(**batch_inputs, use_cache=False).logits[torch.arange(3), last]
-        classic_full = model(batch_inputs["input_ids"], attention_mask=batch_inputs["attention_mask"],
-                            prepend_bos=False, past_kv_cache=None)[torch.arange(3), last]
     torch.testing.assert_close(actual, full.gather(1, answers), rtol=1e-5, atol=1e-6)
-    torch.testing.assert_close(actual, classic_full.gather(1, answers), rtol=1e-5, atol=1e-6)
     for i in range(3):
         single = {key: value[i:i + 1, :last[i] + 1] for key, value in batch_inputs.items()}
         torch.testing.assert_close(actual[i:i + 1], score_batch(model, single, answers[i:i + 1]), rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.parametrize("role", [0, 1])
-def test_only_requested_tokens_change_and_hooks_are_removed(model, inputs, role):
+def test_only_requested_tokens_change_and_edits_do_not_persist(model, hf_model, inputs, role):
     batch_inputs, positions, answers = inputs
+    baseline = score_batch(model, batch_inputs, answers)
     before, after = [], []
     deltas = torch.arange(96, dtype=torch.float32).reshape(3, 32) / 32
-    with model.hooks(fwd_hooks=[
-        ("blocks.0.hook_resid_post", lambda hidden, hook: before.append(hidden.clone())),
-        ("blocks.1.hook_resid_pre", lambda hidden, hook: after.append(hidden.clone())),
-    ]):
+    handle = hf_model.gpt_neox.layers[0].register_forward_hook(
+        lambda module, args, hidden: before.append(hidden.clone())
+    )
+    try:
+        with torch.inference_mode():
+            hf_model(**batch_inputs, use_cache=False)
+    finally:
+        handle.remove()
+    handle = model.gpt_neox.layers[1]._module.register_forward_pre_hook(
+        lambda module, args: after.append(args[0].clone())
+    )
+    try:
         score_batch(model, batch_inputs, answers, 0, positions[:, role], deltas)
-        assert model.hook_dict["blocks.0.hook_resid_post"].fwd_hooks
+    finally:
+        handle.remove()
     expected = before[0].clone()
     expected[torch.arange(3), positions[:, role]] += deltas
     torch.testing.assert_close(after[0], expected, rtol=0, atol=0)
-    assert all(not hook.fwd_hooks for hook in model.hook_dict.values())
+    torch.testing.assert_close(score_batch(model, batch_inputs, answers), baseline, rtol=0, atol=0)
 
 
 def test_zero_edits_and_final_block_preserve_baseline(model, inputs):
@@ -144,7 +151,7 @@ def test_scoring_unembeds_only_one_position(model, inputs, monkeypatch):
     linear = torch.nn.functional.linear
 
     def record(input, weight, bias=None):
-        if weight.shape == (model.cfg.d_vocab_out, model.cfg.d_model):
+        if weight.shape == (model.config.vocab_size, model.config.hidden_size):
             shapes.append(tuple(input.shape))
         return linear(input, weight, bias)
 
@@ -180,22 +187,37 @@ def test_interventions_match_unwrapped_hf(model, hf_model, rows, inputs, layer, 
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
 
 
-def test_failed_forward_cleans_up_hook(model, inputs, monkeypatch):
+def test_failed_forward_does_not_leave_an_edit(model, inputs, monkeypatch):
+    batch_inputs, positions, answers = inputs
+    baseline = score_batch(model, batch_inputs, answers)
+
     def fail(*args, **kwargs):
         raise RuntimeError("forward failed")
 
-    monkeypatch.setattr(model, "forward", fail)
-    batch_inputs, positions, answers = inputs
-    with pytest.raises(RuntimeError, match="forward failed"):
-        score_batch(model, batch_inputs, answers, 0, positions[:, 0], torch.ones(3, 32))
-    assert all(not hook.fwd_hooks for hook in model.hook_dict.values())
+    with monkeypatch.context() as patch:
+        patch.setattr(model.gpt_neox.layers[1]._module, "forward", fail)
+        with pytest.raises(RuntimeError, match="forward failed"):
+            score_batch(model, batch_inputs, answers, 0, positions[:, 0], torch.ones(3, 32))
+    torch.testing.assert_close(score_batch(model, batch_inputs, answers), baseline, rtol=0, atol=0)
 
 
-def test_nonfinite_edit_cleans_up_hook(model, inputs):
+def test_nonfinite_edit_does_not_persist(model, inputs):
     batch_inputs, positions, answers = inputs
+    baseline = score_batch(model, batch_inputs, answers)
     with pytest.raises(ValueError, match="Nonfinite edited"):
         score_batch(model, batch_inputs, answers, 0, positions[:, 0], torch.full((3, 32), float("nan")))
-    assert all(not hook.fwd_hooks for hook in model.hook_dict.values())
+    torch.testing.assert_close(score_batch(model, batch_inputs, answers), baseline, rtol=0, atol=0)
+
+
+def test_custom_prompt_preserves_roles_and_answer_boundary(rows, tokenizer):
+    template = "{sentence}\nWho performed the action?\nAnswer:"
+    ids, positions, answers = prepare_prompts(rows[:2], tokenizer, prompt_template=template)
+    assert positions.tolist() == [[1, 4], [6, 1]]
+    for row, tokens, candidates in zip(rows, ids, answers):
+        prompt = template.format(sentence=row["sentence"])
+        assert tokenizer.decode(tokens) == prompt
+        for role, candidate in zip(["agent", "patient"], candidates):
+            assert tokenizer(prompt + " " + row[role], add_special_tokens=False)["input_ids"] == tokens + [candidate.item()]
 
 
 def test_run_roundtrip_short_batch_and_summary(source_run, tmp_path):
@@ -214,9 +236,9 @@ def test_run_roundtrip_short_batch_and_summary(source_run, tmp_path):
     assert metadata["controls"] == {"zero_vector_first_batch": "passed", "final_block_all_rows": "passed"}
     assert metadata["prompt_template"] == PROMPT_TEMPLATE
     assert metadata["model"]["commit"] == "test-commit"
-    assert metadata["schema_version"] == 3
+    assert metadata["schema_version"] == 4
     assert metadata["execution_model"]["weight_processing"] == "none"
-    assert metadata["scoring_hook"] == "unembed.hook_in"
+    assert metadata["scoring_hook"] == "embed_out.input"
     assert json.loads((output / "metadata.json").read_text()) == metadata
     assert set(row["split"] for row in baseline) == {"test", "gen_test"}
     assert len({(row["pair_id"], row["voice"], row["layer"], row["mean_type"], row["edited_role"]) for row in results}) == 56
@@ -294,7 +316,7 @@ def test_incompatible_inputs_fail_without_completion(source_run, tmp_path, probl
     elif problem == "schema":
         del metadata["schema_version"]
     elif problem == "hooks":
-        metadata["hook_names"] = ["blocks.0.hook_resid_pre", "blocks.1.hook_resid_pre"]
+        metadata["hook_names"] = ["gpt_neox.layers.0.input", "gpt_neox.layers.1.input"]
     else:
         vectors = torch.load(vectors_dir / "syntactic_vectors.pt", weights_only=True)
         vectors["pooled"][0, 0, 0] = float("nan")

@@ -26,8 +26,8 @@ def source_run(tmp_path, model_metadata):
     activations = base + offsets[:, None, None, None]
     torch.save({"activations": activations, "rows": rows}, run / "activations.pt")
     metadata = {
-        "schema_version": 3,
-        "hook_names": ["blocks.0.hook_resid_post", "blocks.1.hook_resid_post"],
+        "schema_version": 4,
+        "hook_names": ["gpt_neox.layers.0.output", "gpt_neox.layers.1.output"],
         "corpus": "/example/corpus.csv",
         "corpus_sha256": "a" * 64,
         "model": {
@@ -126,7 +126,7 @@ def test_missing_training_groups_are_rejected(source_run, tmp_path, group):
     ("activation_site", "Final normalized output", "block outputs"),
     ("sentences_by_split", {"train": 6}, "split counts"),
     ("schema_version", 1, "Regenerate"),
-    ("hook_names", ["blocks.0.hook_resid_pre", "blocks.1.hook_resid_pre"], "hook names"),
+    ("hook_names", ["gpt_neox.layers.0.input", "gpt_neox.layers.1.input"], "hook names"),
 ])
 def test_incompatible_metadata_is_rejected(source_run, tmp_path, field, value, message):
     metadata = json.loads((source_run / "metadata.json").read_text())

@@ -9,9 +9,9 @@ description = "Controlled active/passive datasets for representation steering ex
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
-    "torch>=2.6,<2.8",
+    "torch==2.7.1",
     "transformers==5.9.0",
-    "transformer-lens==3.9.0",
+    "nnsight==0.7.0",
 ]
 
 [dependency-groups]

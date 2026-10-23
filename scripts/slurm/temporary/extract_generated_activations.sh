@@ -18,5 +18,5 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
 
 .venv/bin/python -u scripts/extract_activations.py \
     --corpus data/generated/corpus.csv \
-    --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/activations/pythia-6.9b-step143000-generated-tl3 \
+    --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/activations/pythia-6.9b-step143000-generated-nnsight \
     --batch-size 32 --device cuda --dtype float32
