@@ -1,3 +1,5 @@
+> Historical instruction-tuned Qwen3 experiment. The active Base workflow is documented in README.md.
+
 # Qwen3-8B role-intervention experiment
 
 ## Experimental setup

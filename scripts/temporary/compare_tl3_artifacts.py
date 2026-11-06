@@ -1,4 +1,6 @@
-"""Record full-experiment differences between the TL4 float16 and TL3 float32 runs."""
+"""Historical experiment: requires its original checkout/environment.
+
+Record full-experiment differences between the TL4 float16 and TL3 float32 runs."""
 
 import json
 from pathlib import Path

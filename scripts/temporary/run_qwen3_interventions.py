@@ -1,4 +1,6 @@
-"""Run the fixed Qwen3 chat-prompt role intervention experiment."""
+"""Historical experiment: requires its original checkout/environment.
+
+Run the fixed Qwen3 chat-prompt role intervention experiment."""
 
 import argparse
 import csv

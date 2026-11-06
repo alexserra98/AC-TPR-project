@@ -1,0 +1,5 @@
+split,voice,sentences,mean_logit_diff,agent_wins,patient_wins,ties,agent_preference,patient_preference,tie_rate
+test,active,40,-11.79375,40,0,0,1.0,0.0,0.0
+test,passive,40,-6.8,39,0,1,0.975,0.0,0.025
+gen_test,active,288,-11.495225694444445,288,0,0,1.0,0.0,0.0
+gen_test,passive,288,-6.94140625,287,0,1,0.9965277777777778,0.0,0.003472222222222222

@@ -11,16 +11,41 @@ from pathlib import Path
 
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
-TOKENIZER_ID = "EleutherAI/pythia-6.9b"
-TOKENIZER_REVISION = "step143000"
+TOKENIZER_ID = "Qwen/Qwen3-8B-Base"
+TOKENIZER_REVISION = "49e3418fbbbca6ecbdf9608b4d22e5a407081db4"
 FILLER_COLUMNS = ["label", "lemma", "past", "participle"]
 CORPUS_COLUMNS = ["pair_id", "sentence", "voice", "agent", "patient", "verb", "split"]
+ANNOTATION_COLUMNS = [
+    "quad_id", "condition", "subset", "verb_class", "np_type", "tense", "swapped",
+    "agent_animacy", "patient_animacy", "animacy_config", "animacy_hierarchy",
+    "np1", "np2", "np1_role", "np2_role", "np1_animacy", "np2_animacy",
+    "agent_np_form", "patient_np_form", "np1_form", "np2_form",
+    "np1_char_span", "np2_char_span", "verb_char_span", "logical_form",
+]
+ENRICHED_CORPUS_COLUMNS = CORPUS_COLUMNS + ANNOTATION_COLUMNS
 TEMPLATES = {
     "active": "The {agent} {past} the {patient}.",
     "passive": "The {patient} was {participle} by the {agent}.",
 }
 # Word indices of the two nouns and the inflected verb in each template.
 FILLER_WORD_INDICES = {"active": (1, 2, 4), "passive": (1, 3, 6)}
+
+
+def load_corpus(path: Path) -> list[dict[str, str]]:
+    """Read a complete core or enriched corpus, preserving its column order."""
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames not in (CORPUS_COLUMNS, ENRICHED_CORPUS_COLUMNS):
+            raise ValueError("Corpus CSV columns must be the core or enriched schema")
+        rows = list(reader)
+    if not rows or any(
+        None in row or any(value is None or value == "" for value in row.values())
+        for row in rows
+    ):
+        raise ValueError("Corpus must contain complete, nonempty rows")
+    if len({(row["pair_id"], row["voice"]) for row in rows}) != len(rows):
+        raise ValueError("Corpus (pair_id, voice) keys must be unique")
+    return rows
 
 
 def load_fillers(path: Path) -> tuple[list[str], list[dict[str, str]]]:

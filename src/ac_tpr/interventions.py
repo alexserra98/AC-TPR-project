@@ -1,4 +1,4 @@
-"""Evaluate separate agent/patient role translations at Pythia block outputs."""
+"""Evaluate joint agent/patient role translations at Qwen3-8B-Base block outputs."""
 
 import csv
 import hashlib
@@ -14,14 +14,13 @@ from pathlib import Path
 import torch
 import transformers
 from nnsight import LanguageModel
-from transformers import AutoTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer
 
-from ac_tpr.activations import ROLES, tokenize_roles
-from ac_tpr.dataset import CORPUS_COLUMNS, TOKENIZER_ID, TOKENIZER_REVISION
+from ac_tpr.prompts import PROMPT_TEMPLATE, ROLES, prepare_prompts
+from ac_tpr.dataset import CORPUS_COLUMNS, TOKENIZER_ID, TOKENIZER_REVISION, load_corpus
 from ac_tpr.model import SCHEMA_VERSION, load_model, validate_activation_provenance
 from ac_tpr.syntactic_vectors import VOICES
 
-PROMPT_TEMPLATE = "{sentence}\nQuestion: Who is performing the action?\nAnswer:"
 MEAN_TYPES = ["pooled", "by_voice"]
 BASELINE_COLUMNS = CORPUS_COLUMNS + [
     "agent_token_id", "patient_token_id", "agent_position", "patient_position",
@@ -32,37 +31,6 @@ RESULT_COLUMNS = BASELINE_COLUMNS + [
     "intervened_patient_logit", "intervened_logit_diff", "logit_diff_change",
 ]
 GROUP_COLUMNS = ["split", "voice", "layer", "mean_type", "edited_role"]
-
-
-def prepare_prompts(
-    rows: list[dict[str, str]], tokenizer: PreTrainedTokenizerFast,
-    prompt_template: str = PROMPT_TEMPLATE,
-) -> tuple[list[list[int]], torch.Tensor, torch.Tensor]:
-    """Return prompt IDs, sentence role positions, and single-token answer IDs.
-
-    Roles and candidate answers are ordered [agent, patient]. Candidate answers
-    include one leading space. Their tokenization must append exactly one token
-    to the prompt, and the sentence must remain an unchanged token prefix.
-    The template uses {sentence} for the unchanged corpus sentence.
-    """
-    sentence_ids, positions = tokenize_roles(rows, tokenizer)
-    prompts = [prompt_template.format(sentence=row["sentence"]) for row in rows]
-    prompt_ids = tokenizer(prompts, add_special_tokens=False)["input_ids"]
-    answers = []
-    for row, prompt, tokens, prefix in zip(rows, prompts, prompt_ids, sentence_ids, strict=True):
-        if tokens[:len(prefix)] != prefix:
-            raise ValueError("Prompt must preserve sentence tokenization")
-        answer_ids = []
-        for role in ROLES:
-            answer = " " + row[role]
-            ids = tokenizer(answer, add_special_tokens=False)["input_ids"]
-            if len(ids) != 1:
-                raise ValueError(f"The {role} answer must be one token: {answer!r}")
-            if tokenizer(prompt + answer, add_special_tokens=False)["input_ids"] != tokens + ids:
-                raise ValueError("Answer must append exactly one token to the prompt")
-            answer_ids.append(ids[0])
-        answers.append(answer_ids)
-    return prompt_ids, positions, torch.tensor(answers, dtype=torch.long)
 
 
 def role_deltas(
@@ -89,8 +57,10 @@ def score_batch(
 ) -> torch.Tensor:
     """Return CPU float32 [agent, patient] logits at each last non-padding token.
 
-    Inputs use right padding. An optional trace edit translates one sentence token per
-    row after the selected block; other tokens and block outputs are preserved.
+    Inputs use right padding. An optional trace edit translates one or both role
+    tokens per row after the selected block. Positions have shape [batch] or
+    [batch, 2], with deltas shaped [batch, hidden] or [batch, 2, hidden].
+    Other tokens and block outputs are preserved.
     Updates use float32 arithmetic and are cast back to the residual dtype.
     """
     if model.training:
@@ -111,20 +81,30 @@ def score_batch(
         if positions is None or deltas is None:
             raise ValueError("An edit requires a layer, positions, and deltas together")
         positions, deltas = positions.to(device), deltas.to(device=device, dtype=torch.float32)
-        if positions.shape != (len(batch),) or deltas.shape != (len(batch), model.config.hidden_size):
+        if positions.shape not in {(len(batch),), (len(batch), 2)} or deltas.shape != (
+            *positions.shape, model.config.hidden_size
+        ):
             raise ValueError("Edit positions or deltas have incompatible shapes")
-        if ((positions < 0) | (positions >= last)).any():
+        if positions.dtype != torch.long:
+            raise ValueError("Edit positions must contain int64 token indices")
+        if positions.ndim == 2:
+            if (positions[:, 0] == positions[:, 1]).any():
+                raise ValueError("Joint edit positions must be distinct")
+            edit_batch, edit_last = batch[:, None], last[:, None]
+        else:
+            edit_batch, edit_last = batch, last
+        if ((positions < 0) | (positions >= edit_last)).any():
             raise ValueError("Edited tokens must precede the final prompt token")
 
     with model.trace(inputs, use_cache=False):
         if layer is not None:
-            hidden = model.gpt_neox.layers[layer].output.clone()
-            updated = (hidden[batch, positions].float() + deltas).to(hidden.dtype)
+            hidden = model.model.layers[layer].output.clone()
+            updated = (hidden[edit_batch, positions].float() + deltas).to(hidden.dtype)
             if not torch.isfinite(updated).all():
                 raise ValueError("Nonfinite edited activations")
-            hidden[batch, positions] = updated
-            model.gpt_neox.layers[layer].output = hidden
-        model.embed_out.input = model.embed_out.input[batch, last][:, None, :]
+            hidden[edit_batch, positions] = updated
+            model.model.layers[layer].output = hidden
+        model.lm_head.input = model.lm_head.input[batch, last][:, None, :]
         scores = model.output.logits[:, 0].gather(1, answer_ids).float().cpu().save()
     if not torch.isfinite(scores).all():
         raise ValueError("Nonfinite answer logits")
@@ -169,10 +149,11 @@ def summarize_results(results_path: Path, output_path: Path) -> int:
 
 def run_interventions(
     corpus_path: Path, vectors_dir: Path, output_dir: Path,
-    splits: tuple[str, ...] = ("test", "gen_test"), batch_size: int = 32,
-    device: str = "cuda", dtype: str = "float32", limit: int | None = None,
+    splits: tuple[str, ...] = ("test", "gen_test"), batch_size: int = 8,
+    device: str = "cuda", dtype: str = "bfloat16", limit: int | None = None,
+    *, prompt_template: str = PROMPT_TEMPLATE,
 ) -> dict:
-    """Run the fixed agent question with both mean types and separate token edits.
+    """Run the fixed agent question with both mean types and joint role-token edits.
 
     All layers and selected rows are evaluated. Baseline and intervention CSVs
     are streamed by batch. Zero updates on the first batch and final-block edits
@@ -186,19 +167,21 @@ def run_interventions(
         raise FileExistsError(f"Output directory already exists: {output_dir}")
     if batch_size < 1 or (limit is not None and limit < 1):
         raise ValueError("batch_size and limit must be positive")
-    if dtype not in {"float16", "bfloat16", "float32"}:
-        raise ValueError("dtype must be float16, bfloat16, or float32")
+    if dtype not in {"bfloat16", "float32"}:
+        raise ValueError("dtype must be bfloat16 or float32")
     if not splits or len(set(splits)) != len(splits):
         raise ValueError("Select distinct, nonempty splits")
     source = json.loads((vectors_dir / "metadata.json").read_text(encoding="utf-8"))
     validate_activation_provenance(source)
+    if source["prompt_template"] != prompt_template:
+        raise ValueError("Vectors and evaluation must use the same prompt template")
     corpus_hash = hashlib.sha256(corpus_path.read_bytes()).hexdigest()
     if source["split"] != "train" or source["corpus_sha256"] != corpus_hash:
         raise ValueError("Vectors must use training rows from this exact corpus")
     if source["roles"] != ROLES or source["voices"] != VOICES:
         raise ValueError("Vector role or voice ordering is incompatible")
-    if source["activation_site"] != "Transformer block output, before final_layer_norm":
-        raise ValueError("Vectors must describe block outputs before final_layer_norm")
+    if source["activation_site"] != "Transformer block output, before final RMSNorm":
+        raise ValueError("Vectors must describe block outputs before final RMSNorm")
     for component in ("model", "tokenizer"):
         if source[component]["name"] != TOKENIZER_ID or source[component]["revision"] != TOKENIZER_REVISION:
             raise ValueError("Vectors must match the dataset checkpoint and tokenizer")
@@ -217,18 +200,7 @@ def run_interventions(
             raise ValueError("Vector shapes do not match their metadata")
         if vectors[name].dtype != torch.float32 or not torch.isfinite(vectors[name]).all():
             raise ValueError("Vectors must contain finite float32 means")
-    with corpus_path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames != CORPUS_COLUMNS:
-            raise ValueError(f"Corpus CSV columns must be {CORPUS_COLUMNS}")
-        corpus = list(reader)
-    if not corpus or any(
-        None in row or any(value is None or value == "" for value in row.values())
-        for row in corpus
-    ):
-        raise ValueError("Corpus must contain complete nonempty rows")
-    if len({(row["pair_id"], row["voice"]) for row in corpus}) != len(corpus):
-        raise ValueError("Corpus (pair_id, voice) keys must be unique")
+    corpus = load_corpus(corpus_path)
     train_counts = dict(Counter(row["voice"] for row in corpus if row["split"] == "train"))
     if train_counts != source["sentences_by_voice"] or sum(train_counts.values()) != source["sentences"]:
         raise ValueError("Vector training counts do not match the corpus")
@@ -250,7 +222,7 @@ def run_interventions(
         or source["tokenizer"]["pad_token_id"] != tokenizer.pad_token_id
     ):
         raise ValueError("Source tokenization settings are incompatible")
-    input_ids, positions, answer_ids = prepare_prompts(rows, tokenizer)
+    input_ids, positions, answer_ids = prepare_prompts(rows, tokenizer, prompt_template)
     print(f"Loading {TOKENIZER_ID} at {TOKENIZER_REVISION} ({dtype}, {device})", flush=True)
     model, execution_model = load_model(tokenizer, source["model"]["commit"], device, dtype)
     layers, hidden = model.config.num_hidden_layers, model.config.hidden_size
@@ -269,13 +241,16 @@ def run_interventions(
     if torch.device(device).type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     result_count = 0
+    corpus_columns = list(corpus[0])
+    baseline_columns = corpus_columns + BASELINE_COLUMNS[len(CORPUS_COLUMNS):]
+    result_columns = corpus_columns + RESULT_COLUMNS[len(CORPUS_COLUMNS):]
     with (
         (output_dir / "baseline.csv").open("w", newline="", encoding="utf-8") as base_handle,
         (output_dir / "results.csv").open("w", newline="", encoding="utf-8") as result_handle,
     ):
         # Just defining the structure of the output CSVs
-        baseline_writer = csv.DictWriter(base_handle, fieldnames=BASELINE_COLUMNS)
-        result_writer = csv.DictWriter(result_handle, fieldnames=RESULT_COLUMNS)
+        baseline_writer = csv.DictWriter(base_handle, fieldnames=baseline_columns)
+        result_writer = csv.DictWriter(result_handle, fieldnames=result_columns)
         baseline_writer.writeheader()
         result_writer.writeheader()
         for start in range(0, len(rows), batch_size):
@@ -286,13 +261,12 @@ def run_interventions(
             ).to(device)
             baseline = score_batch(model, inputs, answer_ids[start:end])
             if start == 0:
-                for role in range(len(ROLES)):
-                    zero = score_batch(
-                        model, inputs, answer_ids[start:end], 0, positions[start:end, role],
-                        torch.zeros((end - start, hidden)),
-                    )
-                    if not torch.equal(zero, baseline):
-                        raise ValueError("Zero-vector control changed baseline logits")
+                zero = score_batch(
+                    model, inputs, answer_ids[start:end], 0, positions[start:end],
+                    torch.zeros((end - start, 2, hidden)),
+                )
+                if not torch.equal(zero, baseline):
+                    raise ValueError("Zero-vector control changed baseline logits")
             records = []
             for index, row in enumerate(batch_rows):
                 agent, patient = baseline[index].tolist()
@@ -309,25 +283,26 @@ def run_interventions(
                 records.append(record)
             for layer in range(layers):
                 for mean_type in MEAN_TYPES:
-                    for role, edited_role in enumerate(ROLES):
-                        deltas = role_deltas(vectors, batch_rows, mean_type, layer, edited_role)
-                        scores = score_batch(
-                            model, inputs, answer_ids[start:end], layer,
-                            positions[start:end, role], deltas,
-                        )
-                        if layer == layers - 1 and not torch.equal(scores, baseline):
-                            raise ValueError("Final-block control changed answer logits")
-                        for record, (agent, patient) in zip(records, scores.tolist(), strict=True):
-                            # The function expect that in all prompts the AGENT is the correct answer
-                            difference = patient - agent
-                            result_writer.writerow({
-                                **record, "layer": layer, "mean_type": mean_type,
-                                "edited_role": edited_role, "intervened_agent_logit": agent,
-                                "intervened_patient_logit": patient,
-                                "intervened_logit_diff": difference,
-                                "logit_diff_change": difference - record["baseline_logit_diff"],
-                            })
-                            result_count += 1
+                    deltas = torch.stack([
+                        role_deltas(vectors, batch_rows, mean_type, layer, role)
+                        for role in ROLES
+                    ], dim=1)
+                    scores = score_batch(
+                        model, inputs, answer_ids[start:end], layer,
+                        positions[start:end], deltas,
+                    )
+                    if layer == layers - 1 and not torch.equal(scores, baseline):
+                        raise ValueError("Final-block control changed answer logits")
+                    for record, (agent, patient) in zip(records, scores.tolist(), strict=True):
+                        difference = patient - agent
+                        result_writer.writerow({
+                            **record, "layer": layer, "mean_type": mean_type,
+                            "edited_role": "both", "intervened_agent_logit": agent,
+                            "intervened_patient_logit": patient,
+                            "intervened_logit_diff": difference,
+                            "logit_diff_change": difference - record["baseline_logit_diff"],
+                        })
+                        result_count += 1
             base_handle.flush()
             result_handle.flush()
             print(
@@ -345,8 +320,8 @@ def run_interventions(
         "vectors_metadata_sha256": hashlib.sha256((vectors_dir / "metadata.json").read_bytes()).hexdigest(),
         "model": source["model"], "execution_model": execution_model,
         "tokenizer": source["tokenizer"], "activation_site": source["activation_site"],
-        "hook_names": source["hook_names"], "scoring_hook": "embed_out.input",
-        "prompt_template": PROMPT_TEMPLATE, "answer_prefix": " ",
+        "hook_names": source["hook_names"], "scoring_hook": "lm_head.input",
+        "prompt_template": prompt_template, "answer_prefix": " ",
         "original_answer": "agent", "counterfactual_answer": "patient",
         "logit_diff": "patient_logit - agent_logit",
         "logit_diff_change": "intervened_logit_diff - baseline_logit_diff",
@@ -358,8 +333,12 @@ def run_interventions(
             "baseline_logit_diff < 0 and intervened_logit_diff > 0; "
             "denominator is all sentences in the group"
         ),
-        "intervention": "h + (mean_other_role - mean_edited_role), float32 update cast to residual dtype",
-        "strength": 1.0, "mean_types": MEAN_TYPES, "edited_roles": ROLES,
+        "intervention": (
+            "Simultaneously at the same block output: "
+            "h_agent + (mean_patient - mean_agent), h_patient + (mean_agent - mean_patient); "
+            "float32 updates cast to residual dtype"
+        ),
+        "strength": 1.0, "mean_types": MEAN_TYPES, "edited_roles": ["both"],
         "voices": VOICES, "layer_indices": list(range(layers)),
         "splits": list(splits), "limit": limit,
         "sentences_by_split": dict(Counter(row["split"] for row in rows)),

@@ -40,9 +40,9 @@
   },
   "tokenizer": {
     "add_special_tokens": false,
-    "backend_sha256": "a19b2602a5bdadad2bb67d1f7e655bc5db77892d506ca9df68ee5422a47a4578",
-    "name": "EleutherAI/pythia-6.9b",
-    "revision": "step143000"
+    "backend_sha256": "41e00eccf531cffc2e562d38bdd879d41e5044ea279af5b73c6a32aabcc8fe04",
+    "name": "Qwen/Qwen3-8B-Base",
+    "revision": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4"
   },
   "vocabulary": {
     "nouns": [

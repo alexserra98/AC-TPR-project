@@ -1,0 +1,47 @@
+{
+  "filters": {
+    "subset": [
+      "mixed_contact"
+    ]
+  },
+  "selected_sentences": 656,
+  "selected_interventions": 47232,
+  "run_directory": "/orfeo/cephfs/scratch/dssc/zenocosini/ac-tpr-cache/qwen3-8b-base-active-pass-long-agent-fewshot-nnsight/interventions",
+  "run_created_at": "2026-11-06T13:09:15.779942+00:00",
+  "model": {
+    "api": "LanguageModel",
+    "attention_implementation": "eager",
+    "backend": "nnsight",
+    "commit": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4",
+    "dtype": "bfloat16",
+    "name": "Qwen/Qwen3-8B-Base",
+    "nnsight_version": "0.7.0",
+    "revision": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4",
+    "transformers_version": "5.9.0",
+    "weight_processing": "none"
+  },
+  "execution_model": {
+    "api": "LanguageModel",
+    "attention_implementation": "eager",
+    "backend": "nnsight",
+    "commit": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4",
+    "dtype": "bfloat16",
+    "name": "Qwen/Qwen3-8B-Base",
+    "nnsight_version": "0.7.0",
+    "revision": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4",
+    "transformers_version": "5.9.0",
+    "weight_processing": "none"
+  },
+  "schema_version": 5,
+  "source_sha256": {
+    "metadata.json": "e01b61db0c3ded88f9288cc945d0df4028568727a94ecd0e16acf22e4592a3b0",
+    "baseline.csv": "b779059190d5cc06054af18fe12b9698ff0c7b39638cc87647725f78eac527e3",
+    "results.csv": "3f3519f8598841a1869e70095b44e922c87d6c9b0544bcb6eb396dcd03607dc5"
+  },
+  "conditional_flip_rate": "agent_to_patient_flip_rate / baseline_agent_preference_rate",
+  "edited_roles": [
+    "both"
+  ],
+  "intervention": "Simultaneously at the same block output: h_agent + (mean_patient - mean_agent), h_patient + (mean_agent - mean_patient); float32 updates cast to residual dtype",
+  "uncertainty": "Descriptive curves; no uncertainty intervals"
+}

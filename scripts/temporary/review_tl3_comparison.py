@@ -1,4 +1,6 @@
-"""Validate TL3 against HF at float32 and retain the old float16 comparison."""
+"""Historical experiment: requires its original checkout/environment.
+
+Validate TL3 against HF at float32 and retain the old float16 comparison."""
 
 import json
 from pathlib import Path

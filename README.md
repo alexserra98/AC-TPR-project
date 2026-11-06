@@ -1,7 +1,7 @@
 # AC TPR project
 
 Controlled active/passive sentences for studying agent and patient representations
-in Pythia 6.9B. The tools generate and validate a dataset, extract agent/patient
+in Qwen3-8B-Base. The tools generate and validate a dataset, extract agent/patient
 activations, compute training role means, and evaluate role interventions.
 
 **Voice** describes the active or passive construction. **Role** describes the
@@ -26,76 +26,105 @@ uv sync --locked
 filesystems. Set these variables in each shell or Slurm job that runs the tools.
 Dataset generation uses the CPU and downloads only tokenizer files.
 
-### Local NNsight implementation
+### Model and prompt contract
 
-The loader resolves `EleutherAI/pythia-6.9b` at `step143000` to its exact
-Hugging Face checkpoint commit and wraps the raw causal model with NNsight
-`LanguageModel`. It uses eager attention in evaluation mode with frozen weights.
-The supplied fast tokenizer, right padding, explicit attention masks, and absence
-of BOS/EOS insertion are preserved. Every trace disables KV caching.
+The active pipeline uses only `Qwen/Qwen3-8B-Base`, pinned to commit
+`49e3418fbbbca6ecbdf9608b4d22e5a407081db4` for both model and tokenizer.
+NNsight `LanguageModel` wraps raw Hugging Face weights with eager attention,
+evaluation mode, and frozen parameters. GPU defaults are bfloat16 and batch
+size 8; CPU tests use tiny Qwen3 models in float32. Float16 is not supported.
+Every trace disables KV caching. Inputs use right padding and explicit attention
+masks without added BOS/EOS tokens.
 
-Extraction and edits use `model.gpt_neox.layers[layer].output`, before final
-normalization. These outputs are tensors with the pinned Transformers version.
-Extraction saves only agent/patient states to CPU and stops after the last block,
-without projecting vocabulary logits. Scoring reduces `model.embed_out.input`
-to the last non-padding token of each sentence before the vocabulary projection.
-Edits are local to each trace; subsequent calls start from the unedited model.
+`ac_tpr.prompts` defines the five plain-text demonstrations from the baseline
+notebook and the target sentence/question. No chat template or thinking tokens
+are used. Extraction and intervention use this same full prompt. Role indices
+come from character offsets inside the inserted target sentence, even when the
+same sentence or nouns appear in demonstrations. Answers are one leading space
+plus the noun and must append exactly one token.
 
-The default dtype is **float32**. The existing float16 restriction is retained
-because eager query/key products can overflow. This migration does not add
-reduced-precision validation, remote NDIF execution, or attention-internal hooks.
+Extraction and edits use `model.model.layers[layer].output` before final RMSNorm.
+Extraction saves role states on CPU and stops before vocabulary projection.
+Scoring reduces `model.lm_head.input` to the last non-padding position per row.
+Edits are confined to each trace, including when a forward fails.
 
-Activation, vector, and intervention metadata use `schema_version: 4`. Consumers
-require the NNsight backend, canonical activation sites, raw weights, eager
-attention, and matching installed NNsight and Transformers versions. Historical
-artifacts must be regenerated. Tensor layouts and CSV columns are unchanged.
-Intervention metadata preserves extraction provenance under `model` and records
-execution provenance separately under `execution_model`. Extraction and scoring
-metadata record elapsed time and peak GPU memory.
+Activation, vector, and intervention metadata use `schema_version: 5` and record
+the prompt template. Consumers reject incompatible checkpoint, tokenizer, prompt,
+hooks, or software versions. Extraction and intervention accept a keyword-only
+`prompt_template` argument; callers must supply the same value at both stages.
+Changing notebook prompt settings alone does not change the pipeline default.
+Source model provenance and scoring execution provenance remain separate.
 
-### Validation and regeneration
+### Validation and GPU runs
 
-CPU tests compare independent, identically weighted Hugging Face and NNsight
-models with eager attention (`rtol=1e-5, atol=1e-6`). The migration comparison also
-reuses the saved TL3 float32 outputs, reference token batches, and role vectors.
-The real-checkpoint comparison covers all 128 layer/mean/role conditions.
-Activation bounds remain `rtol=1e-4, atol=5e-4`, with relative RMS below `1e-5`;
-score bounds remain `rtol=1e-4, atol=1e-4`. Zero-vector and final-block controls
-require exact equality. A failed comparison stops regeneration.
-
-The NNsight migration passed 101 CPU tests and the saved CPU/GPU comparisons.
-On the A100 reference run, activation relative RMS error against TL3 was
-`6.98e-6`; the maximum change in candidate logit difference was `4.82e-4`,
-with no preference changes in the eight reference rows. The 128-condition
-comparison took 20.2 seconds after loading and used 25.6 GiB of allocated GPU
-memory. Hardware differs from the historical V100 run, so this is not a
-controlled performance comparison.
-
-Full regeneration completed for all 3,840 sentences, 1,688 training examples,
-and 1,940 evaluation sentences (248,320 intervention rows). The full sweep took
-63.7 minutes on the A100 and peaked at 25.7 GiB of allocated GPU memory. Both
-notebooks were executed and the NNsight figures exported.
+Run the unit tests and the small real-checkpoint smoke pipeline:
 
 ```bash
-HF_HUB_OFFLINE=1 OMP_NUM_THREADS=2 .venv/bin/python scripts/temporary/compare_nnsight.py \
-  --output-dir ac-tpr-cache/migration-comparison-nnsight-cpu
-sbatch scripts/slurm/temporary/compare_nnsight.sh
-# After both comparisons pass:
-sbatch scripts/slurm/temporary/regenerate_nnsight.sh
+OMP_NUM_THREADS=2 HF_HUB_OFFLINE=1 .venv/bin/python -m pytest
+OMP_NUM_THREADS=2 HF_HUB_OFFLINE=1 .venv/bin/python scripts/temporary/validate_qwen3_base.py \
+  --output-dir ac-tpr-cache/qwen3-8b-base-active-pass-long-fewshot-smoke
 ```
 
-All run directories must be new. The regeneration wrapper checks both comparison
-reports against the installed package versions, writes
-`ac-tpr-cache/migration-validation-nnsight.json`, and runs full extraction,
-training-role averaging, an 8-row smoke test, and the full intervention sweep.
-It then executes both analysis notebooks; install the notebook dependencies with
-`uv sync --locked --group notebook` before running it.
+The smoke driver validates all 5,808 corpus prompts, then creates a separate
+20-sentence corpus: five training pairs, three test pairs, and two generalization
+pairs. It runs the shared extraction, vector, and intervention entrypoints with
+batch size 2, checks every layer/mean/role condition (1,440 intervention rows),
+and compares baseline scores with independent Transformers forwards at
+`rtol=0.01, atol=0.125` for BF16. Zero-vector and final-block controls require
+exact equality. `validation.json` is written only after every check passes.
+These scores are smoke validation, not research results. Existing output
+directories are rejected.
 
-New experiment directories end in `-nnsight`. Previous HF, `-tl4`, and `-tl3`
-outputs are retained. Earlier migration/debug scripts are historical and require
-the corresponding historical checkout and environment; they are not part of the
-current workflow. The current comparison reads their saved tensors without
-requiring TransformerLens.
+A full run can be submitted with `scripts/slurm/temporary/run_qwen3_base.sh`.
+It uses one A100, four CPU cores, 96 GB host memory, and a 12-hour limit.
+Historical Pythia and instruction-tuned Qwen launchers, notes, notebooks, and
+artifacts are retained but are not compatible inputs to the Base pipeline.
+Historical scripts require their original checkout and environment.
+
+## Prepare active_pass_long
+
+The default corpus is `data/active_pass_long/corpus.csv`, derived from
+`iuliialysova/active_pass_long` at revision
+`949033163b2a9d4d2e1d8c7811e0eaa7f27e749c`. It contains all 5,808 source sentences,
+including names, common nouns, and inanimate participants.
+
+To reproduce it in a new output directory:
+
+```bash
+.venv/bin/python scripts/temporary/prepare_active_pass_long.py --output-dir data/active_pass_long
+```
+
+The converter refuses an existing directory and downloads only the pinned source
+CSV (the tokenizer can use the existing cache). It writes the enriched 32-column
+corpus, `split_metadata.json`, and a Hugging Face dataset README. See
+[data/active_pass_long/README.md](data/active_pass_long/README.md) for schema and
+upload instructions. Questions and demonstrations live in `src/ac_tpr/prompts.py`;
+none are stored in the CSV. Edit its `QUESTION` constant to change the question
+in every demonstration and target prompt for future runs, using the
+same prompt for activation extraction and evaluation.
+
+The seven core columns come first, followed by the source annotations except its
+six question/answer fields. `pair_id` links active/passive versions of the same
+roles; `quad_id` also includes the reversed roles. All four sentences of each
+quad stay in one split. Mary, teacher, and rock are held out from training;
+the remaining quads are split 80/10/10 with seed 42.
+
+| Split | Sentences |
+| --- | ---: |
+| train | 3,300 |
+| val | 412 |
+| test | 416 |
+| gen_test | 1,680 |
+
+The pipeline accepts both the original seven-column schema and this exact
+32-column schema. Annotations survive extraction and baseline/intervention CSVs;
+summary grouping remains unchanged. Only agent/patient fillers and their answer
+candidates must be single tokens. Multi-token verbs such as tickled are allowed.
+The synthetic generator below retains its stricter template validation.
+
+This corpus and the shared “Who or what is performing the action?” prompt require
+fresh activations and vectors. Existing experiment artifacts are preserved;
+the active launcher uses a separate active-pass-long run directory.
 
 ## Generate the starter corpus
 
@@ -148,7 +177,7 @@ The templates are:
 - Passive: `The {patient} was {participle} by the {agent}.`
 
 The generator checks each noun and inflected verb inside every complete sentence
-with the fast `EleutherAI/pythia-6.9b` tokenizer at `step143000`. Each filler span
+with the fast `Qwen/Qwen3-8B-Base` tokenizer at `49e3418fbbbca6ecbdf9608b4d22e5a407081db4`. Each filler span
 must occupy exactly one token. Special tokens are disabled; offsets account for
 leading spaces and terminal punctuation. The CSV's verb lemma is an identifier;
 its inflected forms are the tokens used in sentences.
@@ -184,40 +213,41 @@ Run on a GPU allocation after installing the locked environment:
 
 ```bash
 uv run --locked scripts/extract_activations.py \
-  --corpus data/generated/corpus.csv \
-  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/activations/pythia-6.9b-step143000-generated-nnsight \
-  --batch-size 32 --device cuda --dtype float32
+  --corpus data/active_pass_long/corpus.csv \
+  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/qwen3-8b-base-active-pass-long-agent-fewshot-nnsight/activations \
+  --batch-size 8 --device cuda --dtype bfloat16
 ```
 
-This processes all 3,840 sentences, retaining their original order and splits.
-It uses `EleutherAI/pythia-6.9b` at `step143000`, matching dataset generation.
-Inputs contain the sentence alone, with no question or special tokens. Batches
+This processes all 5,808 sentences, retaining their original order and splits.
+It uses `Qwen/Qwen3-8B-Base` at `49e3418fbbbca6ecbdf9608b4d22e5a407081db4`, matching dataset generation.
+Inputs contain the shared five demonstrations, target sentence, question, and
+`Answer:` suffix, without special tokens. Batches
 use right padding and an attention mask. Each noun is located by character
 offsets and must occupy one token; agent/patient order is independent of voice.
 
 Saved states are the residual stream **after each transformer block**, indexed
-0–31. All blocks are captured before the model's final layer normalization,
-including block 31. These are the corresponding block output sites for later
+0–35. All blocks are captured before the model's final layer normalization,
+including block 35. These are the corresponding block output sites for later
 interventions. Embeddings and final normalized states are excluded. Extraction
-uses NNsight `LanguageModel` with raw Hugging Face weights, eager float32
+uses NNsight `LanguageModel` with raw Hugging Face weights, eager bfloat16
 attention, and evaluation mode. Gradients and the KV cache are disabled. Both
-extraction and intervention use `gpt_neox.layers.{layer}.output`. Inputs are
+extraction and intervention use `model.layers.{layer}.output`. Inputs are
 explicit token tensors without BOS insertion.
 
 The new output directory contains:
 
 - `activations.pt`: a dictionary containing `activations`, a CPU tensor with
-  shape `[3840, 32, 2, 4096]` (sentence, layer, role, hidden dimension);
+  shape `[5808, 36, 2, 4096]` (sentence, layer, role, hidden dimension);
   `rows`, the original CSV records in tensor order; `input_ids`, the unpadded
-  token IDs per sentence; and `role_positions`, a `[3840, 2]` tensor of token
+  token IDs per sentence; and `role_positions`, a `[5808, 2]` tensor of token
   indices. Role index 0 is agent and index 1 is patient.
 - `metadata.json`: corpus hash, model revision and resolved commit, activation
   site, tokenization settings, split/voice counts, dtype, software versions,
   device, and Slurm job ID. This file is written last to mark a complete run.
 
-The default float32 tensor occupies about 3.8 GiB on disk and in CPU memory.
+The default bfloat16 tensor occupies about 3.2 GiB on disk and in CPU memory.
 Model weights and temporary inference tensors also need memory. The model must
-fit on one device. `--dtype` also accepts `bfloat16`; a CPU run should
+fit on one device. `--dtype` also accepts `float32`; a CPU run should
 use `--device cpu --dtype float32`. Existing output directories are rejected.
 After an interrupted run, choose a new directory or remove the incomplete output
 before rerunning.
@@ -228,7 +258,7 @@ Load the saved dictionary with:
 from pathlib import Path
 import torch
 
-run = Path("/orfeo/scratch/dssc/zenocosini/ac-tpr-cache/activations/pythia-6.9b-step143000-generated-nnsight")
+run = Path("/orfeo/scratch/dssc/zenocosini/ac-tpr-cache/qwen3-8b-base-active-pass-long-agent-fewshot-nnsight/activations")
 assert (run / "metadata.json").exists(), "Extraction is incomplete"
 data = torch.load(run / "activations.pt", map_location="cpu", weights_only=True, mmap=True)
 train_indices = [i for i, row in enumerate(data["rows"]) if row["split"] == "train"]
@@ -238,21 +268,23 @@ agent_layer_0 = data["activations"][train_indices, 0, 0, :]
 Role means use training rows only. Keep voice and token position available for
 analysis because causal context differs between the two voices.
 
-### Slurm run for the generated corpus
+### Full pipeline on Slurm
 
-The one-off wrapper requests one V100, four CPU cores, and 64 GiB of RAM. It uses
-the existing `.venv` and cached checkpoint without network access. Before
-submission, download the checkpoint to `HF_HOME` from a node with network access:
+Cache the pinned checkpoint before submitting the full extraction, vector, and
+intervention workflow:
 
 ```bash
-uv run --locked hf download EleutherAI/pythia-6.9b \
-  --revision step143000 --include '*.json' 'pytorch_model*.bin'
+uv run --locked hf download Qwen/Qwen3-8B-Base \
+  --revision 49e3418fbbbca6ecbdf9608b4d22e5a407081db4
 mkdir -p /orfeo/scratch/dssc/zenocosini/ac-tpr-cache
-sbatch scripts/slurm/temporary/extract_generated_activations.sh
+sbatch scripts/slurm/temporary/run_qwen3_base.sh
 ```
 
-Submit from the repository root. Logs go to
-`/orfeo/scratch/dssc/zenocosini/ac-tpr-cache/extract-<job_id>.log`.
+Submit from the repository root. The new run root is
+`ac-tpr-cache/qwen3-8b-base-active-pass-long-agent-fewshot-nnsight/`, with
+`activations`, `vectors`, and `interventions` subdirectories. Existing roots
+are rejected. The launcher uses the shared pipeline, not the historical chat
+experiment script.
 
 ## Extract syntactic vectors
 
@@ -260,12 +292,12 @@ Compute agent/patient means from a completed activation extraction on CPU:
 
 ```bash
 OMP_NUM_THREADS=2 uv run --locked scripts/extract_syntactic_vectors.py \
-  --activations-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/activations/pythia-6.9b-step143000-generated-nnsight \
-  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/syntactic_vectors/pythia-6.9b-step143000-generated-train-nnsight
+  --activations-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/qwen3-8b-base-active-pass-long-agent-fewshot-nnsight/activations \
+  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/qwen3-8b-base-active-pass-long-agent-fewshot-nnsight/vectors
 ```
 
-The script uses only rows with `split == "train"`: 1,688 sentences in the generated
-corpus, including 844 active and 844 passive sentences. Each sentence contributes
+The script uses only rows with `split == "train"`: 3,300 sentences in active_pass_long,
+including 1,650 active and 1,650 passive sentences. Each sentence contributes
 one vector per role and layer. Pooled means weight each training sentence equally;
 per-voice means average active and passive sentences separately. Validation, test,
 and generalization test rows do not contribute.
@@ -273,17 +305,17 @@ and generalization test rows do not contribute.
 The input tensor is memory mapped and processed one layer at a time. Selected
 states are converted to float32 before averaging, and means are stored in
 float32. No model or tokenizer is loaded. The means retain the original residual
-coordinates at block outputs 0–31, before final normalization. They are arithmetic
+coordinates at block outputs 0–35, before final normalization. They are arithmetic
 means without centering, projection, or unit normalization. Agent and patient are
 semantic roles; whether these means capture useful syntax remains an experimental
 question.
 
 The new output directory contains:
 
-- `syntactic_vectors.pt`: a dictionary with `pooled`, shaped `[32, 2, 4096]`
-  (layer, role, hidden dimension), and `by_voice`, shaped `[2, 32, 2, 4096]`
+- `syntactic_vectors.pt`: a dictionary with `pooled`, shaped `[36, 2, 4096]`
+  (layer, role, hidden dimension), and `by_voice`, shaped `[2, 36, 2, 4096]`
   (voice, layer, role, hidden dimension). Role order is `[agent, patient]` and
-  voice order is `[active, passive]`. Together the tensors occupy 3 MiB.
+  voice order is `[active, passive]`. Together the tensors occupy 3.375 MiB.
 - `metadata.json`: tensor axes, shapes, output dtype, layer/role/voice ordering,
   training sentence counts, averaging rule, source directory, corpus hash, and
   source model, tokenizer, and activation-site details. `model.dtype` describes
@@ -301,7 +333,7 @@ Load the means with:
 from pathlib import Path
 import torch
 
-run = Path("/orfeo/scratch/dssc/zenocosini/ac-tpr-cache/syntactic_vectors/pythia-6.9b-step143000-generated-train-nnsight")
+run = Path("/orfeo/scratch/dssc/zenocosini/ac-tpr-cache/qwen3-8b-base-active-pass-long-agent-fewshot-nnsight/vectors")
 assert (run / "metadata.json").exists(), "Vector extraction is incomplete"
 vectors = torch.load(run / "syntactic_vectors.pt", map_location="cpu", weights_only=True)
 pooled_agent_layer_0 = vectors["pooled"][0, 0]
@@ -314,42 +346,42 @@ Run on a GPU allocation with the checkpoint already cached:
 
 ```bash
 uv run --locked scripts/run_interventions.py \
-  --corpus data/generated/corpus.csv \
-  --vectors-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/syntactic_vectors/pythia-6.9b-step143000-generated-train-nnsight \
-  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/interventions/pythia-6.9b-step143000-generated-agent-nnsight \
-  --splits test gen_test --batch-size 32 --device cuda --dtype float32
+  --corpus data/active_pass_long/corpus.csv \
+  --vectors-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/qwen3-8b-base-active-pass-long-agent-fewshot-nnsight/vectors \
+  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/qwen3-8b-base-active-pass-long-agent-fewshot-nnsight/interventions \
+  --splits test gen_test --batch-size 8 --device cuda --dtype bfloat16
 ```
 
-The default splits contain 1,940 sentences: 212 in `test` and 1,728 in `gen_test`.
-Every selected sentence is evaluated with this fixed prompt, without special
-tokens or trailing whitespace:
+The default splits contain 2,096 sentences: 416 in `test` and 1,680 in `gen_test`.
+Every selected sentence uses the shared few-shot prefix followed by this target
+section, without special tokens or trailing whitespace:
 
 ```text
 {sentence}
-Question: Who is performing the action?
+Question: Who or what is performing the action?
 Answer:
 ```
 
 The candidate answers are the agent and patient nouns with a leading space,
-such as `" boy"`. Each must append exactly one token to the prompt. The sentence
-must remain an unchanged token prefix, preserving the role positions used for
-activation extraction. The baseline scores both candidates at the final
+such as `" boy"`. Each must append exactly one token to the prompt. Role positions are located inside the target sentence in the full prompt,
+using exactly the same preparation as activation extraction. The baseline scores both candidates at the final
 non-padding prompt token. Pairwise agent preference means its logit exceeds the
 patient's; it does not measure unrestricted answer generation.
 
-For each block 0–31, the script evaluates both `pooled` means and `by_voice` means
+For each block 0–35, the script evaluates both `pooled` means and `by_voice` means
 matching the sentence's voice. Each condition starts from an independent forward
-pass and changes one noun token:
+pass and changes both noun tokens simultaneously at the same block output
+(`edited_role=both`):
 
-- `edited_role=agent`: add `mu_patient - mu_agent` at the agent token.
-- `edited_role=patient`: add `mu_agent - mu_patient` at the patient token.
+- At the agent token, add `mu_patient - mu_agent`.
+- At the patient token, add `mu_agent - mu_patient`.
 
 The edit has strength 1, uses float32 arithmetic, and is cast back to the residual
 dtype. NNsight edits act on block outputs before final normalization and are
 confined to one trace, including when a forward fails. The model uses eager
 attention in evaluation mode, with gradients and KV caching disabled. Assigning
-`embed_out.input` selects the final non-padding state before the language-model
-head, so it processes one position per sentence. GPU scoring defaults to float32; `--dtype float32 --device
+`lm_head.input` selects the final non-padding state before the language-model
+head, so it processes one position per sentence. GPU scoring defaults to bfloat16; `--dtype float32 --device
 cpu` supports small-model checks. `--limit N` selects the first N matching rows
 in corpus order for smoke runs.
 
@@ -371,44 +403,35 @@ The new output directory contains:
 
 - `baseline.csv`: one row per sentence, preserving corpus columns and recording
   candidate token IDs, role positions, both baseline logits, and their difference.
-- `results.csv`: one row per sentence, layer, mean type, and edited role. It
+- `results.csv`: one row per sentence, layer, and mean type, with `edited_role=both`. It
   includes baseline fields, both intervened logits, their difference, and the
-  change from baseline. The default run produces 248,320 rows.
+  change from baseline. The default run produces 150,912 rows.
 - `summary.csv`: counts, mean scores/changes, preference rates, and flip rates
   grouped by split, voice, layer, mean type, and edited role. The default run has
-  512 groups. Test and held-out-noun results remain separately identifiable.
+  288 groups. Test and held-out-noun results remain separately identifiable.
 - `metadata.json`: input hashes, source model/tokenizer and activation site,
   fixed prompt, scoring definitions, intervention settings, controls, row counts,
   software versions, GPU, and Slurm job ID. Written last to mark completion.
 
-Zero-vector edits at either role on the first batch must reproduce baseline
+Simultaneous zero-vector edits at both roles on the first batch must reproduce baseline
 logits exactly. Every edit after the final block must also leave answer logits
 unchanged: there is no later attention layer to carry the noun edit to the answer
 position. Nonfinite edits or scores, incompatible vector provenance, or failed
 controls stop the run without completion metadata. Existing output directories
 are rejected; after a failed run, inspect it and choose a new output directory.
 
-### Slurm smoke check and full run
-
-```bash
-sbatch scripts/slurm/temporary/run_generated_interventions.sh
-```
-
-Submit from the repository root after installing the locked environment and
-caching the checkpoint as described above. The wrapper requests one V100, four
-CPU cores, 96 GiB RAM, and four hours. It runs eight selected sentences through
-every condition and layer, saving to a directory ending in `-agent-smoke-nnsight`. Only a
-successful smoke run starts the full evaluation. Both runs use the same fixed
-prompt and settings. Logs go to
-`/orfeo/scratch/dssc/zenocosini/ac-tpr-cache/intervene-<job_id>.log`.
+Use the smoke driver above for the 20-sentence validation, and the Base Slurm
+launcher for the full corpus. They write separate directories and never replace
+historical experiment results.
 
 ## Plot intervention results
 
-Open [the executed notebook](notebook/role_interventions.ipynb) to inspect the
-completed run. It includes four figures: baseline answer preferences, mean logit
+Open [the analysis notebook](notebook/role_interventions.ipynb) after completing a full Base run. It includes four figures: baseline answer preferences, mean logit
 changes across blocks, intervened scores relative to baseline, and conditional
 agent-to-patient flip rates. Test/generalization splits and active/passive voices
-have separate panels. The notebook reads the saved baseline and summary CSVs
+have separate panels. The two intervention curves compare pooled and per-voice
+means with both role tokens edited together. The notebook requires joint-run
+metadata (`edited_roles=["both"]`) and reads the saved baseline and summary CSVs
 through the `ac-tpr-cache` scratch-storage link and runs entirely on CPU.
 
 Install the optional plotting dependencies with `uv sync --locked --group notebook`
@@ -429,9 +452,9 @@ PY
 ```
 
 Each run saves PNG and PDF figures, baseline statistics, descriptive peak
-conditions, and source hashes under `notebook/figures/role_interventions_nnsight/`.
-Start with the [logit-change plot](notebook/figures/role_interventions_nnsight/logit_change.png)
-or its [vector PDF](notebook/figures/role_interventions_nnsight/logit_change.pdf).
+conditions, and source hashes under `notebook/figures/role_interventions_qwen3_base_active_pass_long/`.
+Figures are generated when the analysis notebook is executed; historical figures
+remain in their original directories.
 
 The conditional flip plot divides the saved all-sentence flip rate by the
 baseline agent preference rate. Its denominator is therefore baseline agent wins;
@@ -446,8 +469,8 @@ uv run --locked pytest
 ```
 
 Tests cover sentence roles and irregular verbs, split isolation and balance,
-reproducibility, input errors, and tokenization using the real Pythia tokenizer.
-Activation tests compare independent small GPT-NeoX models with identical
+reproducibility, input errors, and tokenization using the real Qwen tokenizer.
+Activation tests compare independent small Qwen3 models with identical
 weights, one wrapped by NNsight, to check role positions, padding, block outputs
 before final normalization, recovery after failed traces, and saved
 artifacts including a short final batch. They do not download model weights.
@@ -458,13 +481,13 @@ Syntactic-vector tests use synthetic activations to check arithmetic means with
 unequal voice counts, exclusion of held-out rows, float32 precision, ordering,
 provenance, and rejection of incomplete or incompatible source artifacts.
 
-Intervention tests compare a small random GPT-NeoX causal model with a matching
+Intervention tests compare a small random Qwen3 causal model with a matching
 NNsight `LanguageModel` to check candidate
 tokenization, padded scoring against the full language-model output, voice-specific
 means, edit direction and position, trace isolation, zero-vector and final-block
 controls, output arithmetic, summaries, and incompatible-input failures.
 Loader tests cover checkpoint pinning, raw-weight and package-version provenance,
-float16 rejection, and large float32 query/key values. Tests also cover custom
+unsupported dtype rejection, and large float32 query/key values. Tests also cover custom
 prompts, extraction stopping before vocabulary projection, and scoring projecting
 only one position per sentence.
 
@@ -472,7 +495,7 @@ only one position per sentence.
 
 - `src/ac_tpr/`: dataset, activations, role means, and intervention/evaluation code.
 - `scripts/`: command-line entry points.
-- `data/`: starter fillers, reference data, and generated corpus.
+- `data/`: active_pass_long, starter fillers, reference data, and generated corpus.
 - `docs/`: [paper review and experiment rationale](docs/acevedo-2026-notes.md).
 - `tests/`: dataset, activation, role-mean, and intervention checks.
 - `notebook/`: executed intervention analysis and exported figures.

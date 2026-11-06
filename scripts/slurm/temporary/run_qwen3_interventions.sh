@@ -1,4 +1,5 @@
 #!/bin/bash
+# HISTORICAL: requires its original checkout/environment; use run_qwen3_base.sh for Base.
 #SBATCH --job-name=ac-tpr-qwen3
 #SBATCH --partition=DGX
 #SBATCH --account=lade

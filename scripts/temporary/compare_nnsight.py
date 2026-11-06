@@ -1,4 +1,6 @@
-"""Validate NNsight against saved TL3 float32 outputs with identical inputs."""
+"""Historical experiment: requires its original checkout/environment.
+
+Validate NNsight against saved TL3 float32 outputs with identical inputs."""
 
 import argparse
 import json

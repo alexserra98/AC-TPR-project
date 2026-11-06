@@ -8,6 +8,7 @@ import torch
 
 from ac_tpr.activations import extract_activations, extract_batch, tokenize_roles
 from ac_tpr.dataset import CORPUS_COLUMNS, TOKENIZER_REVISION, generate_rows
+from ac_tpr.prompts import prepare_prompts, PROMPT_TEMPLATE
 
 
 @pytest.fixture
@@ -35,11 +36,11 @@ def test_batched_hooks_match_individual_residual_states(rows, tokenizer, model, 
     assert not actual.requires_grad
     for index, tokens in enumerate(ids):
         before_norm = []
-        handle = hf_model.gpt_neox.final_layer_norm.register_forward_pre_hook(
+        handle = hf_model.model.norm.register_forward_pre_hook(
             lambda _module, args: before_norm.append(args[0].clone())
         )
         with torch.inference_mode():
-            output = hf_model.gpt_neox(
+            output = hf_model.model(
                 input_ids=torch.tensor([tokens]), use_cache=False, output_hidden_states=True
             )
         handle.remove()
@@ -62,7 +63,7 @@ def test_trace_failure_does_not_affect_next_extraction(rows, tokenizer, model, m
         raise RuntimeError("forward failed")
 
     with monkeypatch.context() as patch:
-        patch.setattr(model.gpt_neox.layers[1]._module, "forward", fail_forward)
+        patch.setattr(model.model.layers[1]._module, "forward", fail_forward)
         with pytest.raises(RuntimeError, match="forward failed"):
             extract_batch(model, inputs, positions)
     torch.testing.assert_close(extract_batch(model, inputs, positions), baseline, rtol=0, atol=0)
@@ -75,7 +76,7 @@ def test_extraction_stops_before_vocabulary_projection(rows, tokenizer, model, m
     def fail_projection(*args, **kwargs):
         raise AssertionError("Extraction must not project vocabulary logits")
 
-    monkeypatch.setattr(model.embed_out._module, "forward", fail_projection)
+    monkeypatch.setattr(model.lm_head._module, "forward", fail_projection)
     assert extract_batch(model, inputs, positions).shape == (4, 2, 2, 32)
 
 
@@ -107,13 +108,14 @@ def test_extraction_roundtrip_and_partial_batch(tmp_path, rows, tokenizer, model
     assert metadata["shape"] == [3, 2, 2, 32]
     assert metadata["roles"] == ["agent", "patient"]
     assert metadata["layer_indices"] == [0, 1]
-    assert metadata["schema_version"] == 4
-    assert metadata["hook_names"] == ["gpt_neox.layers.0.output", "gpt_neox.layers.1.output"]
+    assert metadata["prompt_template"] == PROMPT_TEMPLATE
+    assert metadata["schema_version"] == 5
+    assert metadata["hook_names"] == ["model.layers.0.output", "model.layers.1.output"]
     assert metadata["sentences_by_voice"] == {"active": 2, "passive": 1}
     assert metadata["model"]["revision"] == TOKENIZER_REVISION
     assert json.loads((output_dir / "metadata.json").read_text()) == metadata
     assert torch.isfinite(saved["activations"]).all()
-    ids, positions = tokenize_roles(rows[:3], tokenizer)
+    ids, positions, _ = prepare_prompts(rows[:3], tokenizer)
     assert saved["input_ids"] == ids
     torch.testing.assert_close(saved["role_positions"], positions)
     inputs = tokenizer.pad({"input_ids": ids}, padding=True, return_tensors="pt")
@@ -139,3 +141,25 @@ def test_failed_extraction_has_no_completion_metadata(tmp_path, rows, tokenizer,
     with pytest.raises(ValueError, match="Nonfinite"):
         extract_activations(corpus, output_dir, device="cpu", dtype="float32")
     assert not (output_dir / "metadata.json").exists()
+
+
+def test_custom_prompt_survives_extraction_and_vector_provenance(tmp_path, rows, tokenizer, model, model_metadata, monkeypatch):
+    from ac_tpr.syntactic_vectors import extract_syntactic_vectors
+    corpus = tmp_path / "corpus.csv"
+    for row in rows:
+        row["split"] = "train"
+    with corpus.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CORPUS_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+    monkeypatch.setattr("ac_tpr.activations.AutoTokenizer.from_pretrained", lambda *a, **kw: tokenizer)
+    monkeypatch.setattr("ac_tpr.activations.load_model", lambda *a, **kw: (model, model_metadata))
+    template = "The boy saw the girl.\nAnswer: boy\n\n{sentence}\nAnswer:"
+    output = tmp_path / "activations"
+    extract_activations(corpus, output, device="cpu", dtype="float32", prompt_template=template)
+    metadata = extract_syntactic_vectors(output, tmp_path / "vectors")
+    assert metadata["prompt_template"] == template
+    saved = torch.load(output / "activations.pt", weights_only=True)
+    ids, positions, _ = prepare_prompts(rows, tokenizer, template)
+    assert saved["input_ids"] == ids
+    torch.testing.assert_close(saved["role_positions"], positions)

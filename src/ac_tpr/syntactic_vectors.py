@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-from ac_tpr.activations import ROLES
+from ac_tpr.prompts import ROLES
 from ac_tpr.model import validate_activation_provenance
 
 VOICES = ["active", "passive"]
@@ -36,7 +36,7 @@ def extract_syntactic_vectors(activations_dir: Path, output_dir: Path) -> dict:
     provenance = {
         key: source[key] for key in (
             "corpus", "corpus_sha256", "model", "tokenizer", "activation_site",
-            "layer_indices", "roles", "schema_version", "hook_names",
+            "layer_indices", "roles", "schema_version", "hook_names", "prompt_template",
         )
     }
 
@@ -44,8 +44,8 @@ def extract_syntactic_vectors(activations_dir: Path, output_dir: Path) -> dict:
         raise ValueError(f"Source roles must be ordered as {ROLES}")
     if source["axes"] != ["sentence", "layer", "role", "hidden"]:
         raise ValueError("Source axes must be [sentence, layer, role, hidden]")
-    if source["activation_site"] != "Transformer block output, before final_layer_norm":
-        raise ValueError("Source activations must be block outputs before final_layer_norm")
+    if source["activation_site"] != "Transformer block output, before final RMSNorm":
+        raise ValueError("Source activations must be block outputs before final RMSNorm")
 
     data = torch.load(
         activations_dir / "activations.pt", map_location="cpu", weights_only=True, mmap=True

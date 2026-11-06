@@ -7,9 +7,11 @@ import json
 import pytest
 import torch
 
+from ac_tpr.prompts import FEW_SHOT, PROMPT_TEMPLATE
+
 from ac_tpr.dataset import CORPUS_COLUMNS, TOKENIZER_ID, TOKENIZER_REVISION, generate_rows
 from ac_tpr.interventions import (
-    PROMPT_TEMPLATE, prepare_prompts, role_deltas, run_interventions, score_batch,
+    prepare_prompts, role_deltas, run_interventions, score_batch,
     summarize_results,
 )
 
@@ -46,8 +48,9 @@ def source_run(tmp_path, rows, tokenizer, model, model_metadata, monkeypatch):
         "by_voice": torch.randn((2, 2, 2, 32), generator=generator),
     }, vectors_dir / "syntactic_vectors.pt")
     metadata = {
-        "schema_version": 4,
-        "hook_names": ["gpt_neox.layers.0.output", "gpt_neox.layers.1.output"],
+        "schema_version": 5,
+        "prompt_template": PROMPT_TEMPLATE,
+        "hook_names": ["model.layers.0.output", "model.layers.1.output"],
         "split": "train", "sentences": 4, "sentences_by_voice": {"active": 2, "passive": 2},
         "corpus_sha256": hashlib.sha256(corpus.read_bytes()).hexdigest(),
         "model": model_metadata,
@@ -56,7 +59,7 @@ def source_run(tmp_path, rows, tokenizer, model, model_metadata, monkeypatch):
             "backend_sha256": hashlib.sha256(tokenizer.backend_tokenizer.to_str().encode()).hexdigest(),
             "add_special_tokens": False, "padding_side": "right", "pad_token_id": tokenizer.pad_token_id,
         },
-        "activation_site": "Transformer block output, before final_layer_norm",
+        "activation_site": "Transformer block output, before final RMSNorm",
         "roles": ["agent", "patient"], "voices": ["active", "passive"],
         "layer_indices": [0, 1],
         "axes": {"pooled": ["layer", "role", "hidden"], "by_voice": ["voice", "layer", "role", "hidden"]},
@@ -70,10 +73,12 @@ def source_run(tmp_path, rows, tokenizer, model, model_metadata, monkeypatch):
 
 def test_prompt_roles_and_answer_boundaries(rows, tokenizer):
     ids, positions, answers = prepare_prompts(rows[:2], tokenizer)
-    assert positions.tolist() == [[1, 4], [6, 1]]
-    assert list(map(len, ids)) == [18, 20]
+    assert positions.min() > 0
+    assert len(ids[1]) > len(ids[0])
     for row, tokens, role_positions, candidates in zip(rows, ids, positions, answers):
-        assert tokenizer.decode(tokens) == PROMPT_TEMPLATE.format(sentence=row["sentence"])
+        assert tokenizer.decode(tokens) == PROMPT_TEMPLATE.format(
+            sentence=row["sentence"], few_shot=FEW_SHOT[row["voice"]]
+        )
         for role, position, candidate in zip(["agent", "patient"], role_positions, candidates):
             assert tokens[position] == candidate.item()
             assert tokenizer.decode([candidate.item()]) == " " + row[role]
@@ -106,13 +111,17 @@ def test_scores_match_full_lm_and_unpadded_forwards(model, hf_model, inputs):
         torch.testing.assert_close(actual[i:i + 1], score_batch(model, single, answers[i:i + 1]), rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("role", [0, 1])
+@pytest.mark.parametrize("role", [0, 1, "both"])
 def test_only_requested_tokens_change_and_edits_do_not_persist(model, hf_model, inputs, role):
     batch_inputs, positions, answers = inputs
     baseline = score_batch(model, batch_inputs, answers)
     before, after = [], []
     deltas = torch.arange(96, dtype=torch.float32).reshape(3, 32) / 32
-    handle = hf_model.gpt_neox.layers[0].register_forward_hook(
+    edit_positions = positions if role == "both" else positions[:, role]
+    edit_batch = torch.arange(3)[:, None] if role == "both" else torch.arange(3)
+    if role == "both":
+        deltas = torch.stack([deltas, -deltas], dim=1)
+    handle = hf_model.model.layers[0].register_forward_hook(
         lambda module, args, hidden: before.append(hidden.clone())
     )
     try:
@@ -120,15 +129,15 @@ def test_only_requested_tokens_change_and_edits_do_not_persist(model, hf_model, 
             hf_model(**batch_inputs, use_cache=False)
     finally:
         handle.remove()
-    handle = model.gpt_neox.layers[1]._module.register_forward_pre_hook(
+    handle = model.model.layers[1]._module.register_forward_pre_hook(
         lambda module, args: after.append(args[0].clone())
     )
     try:
-        score_batch(model, batch_inputs, answers, 0, positions[:, role], deltas)
+        score_batch(model, batch_inputs, answers, 0, edit_positions, deltas)
     finally:
         handle.remove()
     expected = before[0].clone()
-    expected[torch.arange(3), positions[:, role]] += deltas
+    expected[edit_batch, edit_positions] += deltas
     torch.testing.assert_close(after[0], expected, rtol=0, atol=0)
     torch.testing.assert_close(score_batch(model, batch_inputs, answers), baseline, rtol=0, atol=0)
 
@@ -141,6 +150,14 @@ def test_zero_edits_and_final_block_preserve_baseline(model, inputs):
         final = score_batch(model, batch_inputs, answers, 1, positions[:, role], torch.ones(3, 32))
         torch.testing.assert_close(zero, baseline, rtol=0, atol=0)
         torch.testing.assert_close(final, baseline, rtol=0, atol=0)
+    joint_deltas = torch.arange(32).expand(3, 32).float()
+    joint_deltas = torch.stack([joint_deltas, -joint_deltas], dim=1)
+    zero = score_batch(model, batch_inputs, answers, 0, positions, torch.zeros(3, 2, 32))
+    final = score_batch(model, batch_inputs, answers, 1, positions, joint_deltas)
+    torch.testing.assert_close(zero, baseline, rtol=0, atol=0)
+    torch.testing.assert_close(final, baseline, rtol=0, atol=0)
+    joint = score_batch(model, batch_inputs, answers, 0, positions, joint_deltas)
+    assert not torch.allclose(joint, baseline)
     earlier = score_batch(model, batch_inputs, answers, 0, positions[:, 0], torch.arange(32).expand(3, 32).float())
     assert not torch.allclose(earlier, baseline)
 
@@ -162,21 +179,34 @@ def test_scoring_unembeds_only_one_position(model, inputs, monkeypatch):
 
 @pytest.mark.parametrize("layer", [0, 1])
 @pytest.mark.parametrize("mean_type", ["pooled", "by_voice"])
-@pytest.mark.parametrize("role_index", [0, 1])
+@pytest.mark.parametrize("role_index", [0, 1, "both"])
 def test_interventions_match_unwrapped_hf(model, hf_model, rows, inputs, layer, mean_type, role_index):
     batch_inputs, positions, answers = inputs
     generator = torch.Generator().manual_seed(7)
     vectors = {"pooled": torch.randn(2, 2, 32, generator=generator),
                "by_voice": torch.randn(2, 2, 2, 32, generator=generator)}
-    deltas = role_deltas(vectors, rows[:3], mean_type, layer, ["agent", "patient"][role_index])
-    actual = score_batch(model, batch_inputs, answers, layer, positions[:, role_index], deltas)
+    if role_index == "both":
+        deltas = torch.stack([
+            role_deltas(vectors, rows[:3], mean_type, layer, role)
+            for role in ["agent", "patient"]
+        ], dim=1)
+        edit_positions = positions
+    else:
+        deltas = role_deltas(vectors, rows[:3], mean_type, layer, ["agent", "patient"][role_index])
+        edit_positions = positions[:, role_index]
+    actual = score_batch(model, batch_inputs, answers, layer, edit_positions, deltas)
 
     def translate(module, args, hidden):
         result = hidden.clone()
-        result[torch.arange(3), positions[:, role_index]] += deltas
+        if role_index == "both":
+            # Apply each role separately as an independent reference for joint indexing.
+            for role in range(2):
+                result[torch.arange(3), positions[:, role]] += deltas[:, role]
+        else:
+            result[torch.arange(3), positions[:, role_index]] += deltas
         return result
 
-    handle = hf_model.gpt_neox.layers[layer].register_forward_hook(translate)
+    handle = hf_model.model.layers[layer].register_forward_hook(translate)
     try:
         with torch.inference_mode():
             logits = hf_model(**batch_inputs, use_cache=False).logits
@@ -187,7 +217,8 @@ def test_interventions_match_unwrapped_hf(model, hf_model, rows, inputs, layer, 
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
 
 
-def test_failed_forward_does_not_leave_an_edit(model, inputs, monkeypatch):
+@pytest.mark.parametrize("joint", [False, True])
+def test_failed_forward_does_not_leave_an_edit(model, inputs, monkeypatch, joint):
     batch_inputs, positions, answers = inputs
     baseline = score_batch(model, batch_inputs, answers)
 
@@ -195,17 +226,26 @@ def test_failed_forward_does_not_leave_an_edit(model, inputs, monkeypatch):
         raise RuntimeError("forward failed")
 
     with monkeypatch.context() as patch:
-        patch.setattr(model.gpt_neox.layers[1]._module, "forward", fail)
+        patch.setattr(model.model.layers[1]._module, "forward", fail)
         with pytest.raises(RuntimeError, match="forward failed"):
-            score_batch(model, batch_inputs, answers, 0, positions[:, 0], torch.ones(3, 32))
+            score_batch(
+                model, batch_inputs, answers, 0,
+                positions if joint else positions[:, 0],
+                torch.ones(3, 2, 32) if joint else torch.ones(3, 32),
+            )
     torch.testing.assert_close(score_batch(model, batch_inputs, answers), baseline, rtol=0, atol=0)
 
 
-def test_nonfinite_edit_does_not_persist(model, inputs):
+@pytest.mark.parametrize("joint", [False, True])
+def test_nonfinite_edit_does_not_persist(model, inputs, joint):
     batch_inputs, positions, answers = inputs
     baseline = score_batch(model, batch_inputs, answers)
     with pytest.raises(ValueError, match="Nonfinite edited"):
-        score_batch(model, batch_inputs, answers, 0, positions[:, 0], torch.full((3, 32), float("nan")))
+        score_batch(
+            model, batch_inputs, answers, 0,
+            positions if joint else positions[:, 0],
+            torch.full((3, 2, 32) if joint else (3, 32), float("nan")),
+        )
     torch.testing.assert_close(score_batch(model, batch_inputs, answers), baseline, rtol=0, atol=0)
 
 
@@ -230,18 +270,21 @@ def test_run_roundtrip_short_batch_and_summary(source_run, tmp_path):
     with (output / "summary.csv").open() as handle:
         summary = list(csv.DictReader(handle))
     assert len(baseline) == metadata["baseline_rows"] == 7
-    assert len(results) == metadata["result_rows"] == 56
-    assert len(summary) == metadata["summary_rows"] == 32
+    assert len(results) == metadata["result_rows"] == 28
+    assert len(summary) == metadata["summary_rows"] == 16
     assert metadata["sentences_by_split"] == {"test": 4, "gen_test": 3}
     assert metadata["controls"] == {"zero_vector_first_batch": "passed", "final_block_all_rows": "passed"}
     assert metadata["prompt_template"] == PROMPT_TEMPLATE
-    assert metadata["model"]["commit"] == "test-commit"
-    assert metadata["schema_version"] == 4
+    assert metadata["model"]["commit"] == "49e3418fbbbca6ecbdf9608b4d22e5a407081db4"
+    assert metadata["schema_version"] == 5
     assert metadata["execution_model"]["weight_processing"] == "none"
-    assert metadata["scoring_hook"] == "embed_out.input"
+    assert metadata["scoring_hook"] == "lm_head.input"
+    assert metadata["edited_roles"] == ["both"]
+    assert {row["edited_role"] for row in results} == {"both"}
+    assert {row["edited_role"] for row in summary} == {"both"}
     assert json.loads((output / "metadata.json").read_text()) == metadata
     assert set(row["split"] for row in baseline) == {"test", "gen_test"}
-    assert len({(row["pair_id"], row["voice"], row["layer"], row["mean_type"], row["edited_role"]) for row in results}) == 56
+    assert len({(row["pair_id"], row["voice"], row["layer"], row["mean_type"], row["edited_role"]) for row in results}) == 28
     lookup = {(row["pair_id"], row["voice"]): row for row in baseline}
     for row in results:
         original = lookup[(row["pair_id"], row["voice"])]
@@ -266,7 +309,7 @@ def test_summary_signs_ties_and_denominators(tmp_path):
         writer.writeheader()
         for baseline, intervened in [(-2, 3), (4, -1), (0, 0)]:
             writer.writerow({"split": "test", "voice": "active", "layer": 0,
-                             "mean_type": "pooled", "edited_role": "agent",
+                             "mean_type": "pooled", "edited_role": "both",
                              "baseline_logit_diff": baseline, "intervened_logit_diff": intervened,
                              "logit_diff_change": intervened - baseline})
     output = tmp_path / "summary.csv"
@@ -316,7 +359,7 @@ def test_incompatible_inputs_fail_without_completion(source_run, tmp_path, probl
     elif problem == "schema":
         del metadata["schema_version"]
     elif problem == "hooks":
-        metadata["hook_names"] = ["gpt_neox.layers.0.input", "gpt_neox.layers.1.input"]
+        metadata["hook_names"] = ["model.layers.0.input", "model.layers.1.input"]
     else:
         vectors = torch.load(vectors_dir / "syntactic_vectors.pt", weights_only=True)
         vectors["pooled"][0, 0, 0] = float("nan")
@@ -337,3 +380,54 @@ def test_nonfinite_scores_have_no_completion_marker(source_run, tmp_path, monkey
     with pytest.raises(ValueError, match="Nonfinite answer"):
         run_interventions(*source_run, output, device="cpu", dtype="float32")
     assert not (output / "metadata.json").exists()
+
+
+@pytest.mark.parametrize("component", ["model", "tokenizer"])
+def test_wrong_checkpoint_is_rejected_before_loading(source_run, tmp_path, monkeypatch, component):
+    corpus, vectors_dir = source_run
+    path = vectors_dir / "metadata.json"
+    metadata = json.loads(path.read_text())
+    metadata[component]["name"] = "Qwen/Qwen3-8B"
+    path.write_text(json.dumps(metadata))
+    def fail(*args, **kwargs):
+        pytest.fail("Incompatible artifacts must be rejected before loading weights")
+    monkeypatch.setattr("ac_tpr.interventions.load_model", fail)
+    with pytest.raises(ValueError, match="pinned Qwen3-8B-Base"):
+        run_interventions(corpus, vectors_dir, tmp_path / "scores")
+
+
+def test_prompt_mismatch_is_rejected_before_loading(source_run, tmp_path, monkeypatch):
+    def fail(*args, **kwargs):
+        pytest.fail("Prompt mismatch must be rejected before loading weights")
+    monkeypatch.setattr("ac_tpr.interventions.load_model", fail)
+    with pytest.raises(ValueError, match="same prompt template"):
+        run_interventions(*source_run, tmp_path / "scores", prompt_template="{sentence}\nAnswer:")
+
+
+@pytest.mark.parametrize("problem", ["positions_shape", "deltas_shape", "duplicate", "negative", "final_token", "padding", "dtype"])
+def test_invalid_joint_edits_are_rejected(model, inputs, problem):
+    batch_inputs, positions, answers = inputs
+    positions = positions.clone()
+    deltas = torch.zeros(3, 2, 32)
+    error = "incompatible shapes"
+    if problem == "positions_shape":
+        positions = positions[:, :1]
+    elif problem == "deltas_shape":
+        deltas = deltas[:, 0]
+    elif problem == "duplicate":
+        positions[:, 1] = positions[:, 0]
+        error = "must be distinct"
+    elif problem == "negative":
+        positions[0, 1] = -1
+        error = "must precede"
+    elif problem == "final_token":
+        positions[0, 1] = batch_inputs["attention_mask"][0].sum() - 1
+        error = "must precede"
+    elif problem == "padding":
+        positions[0, 1] = batch_inputs["attention_mask"][0].sum()
+        error = "must precede"
+    else:
+        positions = positions.float()
+        error = "int64"
+    with pytest.raises(ValueError, match=error):
+        score_batch(model, batch_inputs, answers, 0, positions, deltas)

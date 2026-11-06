@@ -1,4 +1,4 @@
-"""Load the experiment's raw Pythia checkpoint for local NNsight traces."""
+"""Load the experiment's raw Qwen3-8B-Base checkpoint for local NNsight traces."""
 
 from importlib.metadata import version
 
@@ -8,22 +8,24 @@ from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFa
 
 from ac_tpr.dataset import TOKENIZER_ID, TOKENIZER_REVISION
 
-SCHEMA_VERSION = 4
-BLOCK_HOOK = "gpt_neox.layers.{layer}.output"
+SCHEMA_VERSION = 5
+BLOCK_HOOK = "model.layers.{layer}.output"
 
 
 def load_model(
     tokenizer: PreTrainedTokenizerFast, revision: str, device: str, dtype: str,
 ) -> tuple[LanguageModel, dict]:
     """Load raw weights at a resolved commit and return their execution provenance."""
-    if dtype == "float16":
-        raise ValueError(
-            "Pythia eager attention can overflow in float16; use float32"
-        )
+    if dtype not in {"bfloat16", "float32"}:
+        raise ValueError("Use bfloat16 or float32 for Qwen3-8B-Base")
     config = AutoConfig.from_pretrained(TOKENIZER_ID, revision=revision)
+    if config.model_type != "qwen3":
+        raise ValueError("Expected a Qwen3 checkpoint")
     commit = config._commit_hash
     if not commit:
         raise ValueError("Model loading requires a resolved checkpoint commit")
+    if commit != TOKENIZER_REVISION:
+        raise ValueError("Expected the pinned Qwen3-8B-Base commit")
     hf_model = AutoModelForCausalLM.from_pretrained(
         TOKENIZER_ID, revision=commit, dtype=getattr(torch, dtype),
         attn_implementation="eager",
@@ -45,9 +47,16 @@ def load_model(
 
 
 def validate_activation_provenance(source: dict) -> None:
-    """Require raw block outputs from a matching schema-4 NNsight extraction."""
+    """Require raw block outputs from a matching schema-5 NNsight extraction."""
     if source.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError("Regenerate activations and role vectors with NNsight LanguageModel (schema_version 4)")
+        raise ValueError("Regenerate activations and role vectors with NNsight LanguageModel (schema_version 5)")
+    for component in ("model", "tokenizer"):
+        if source[component]["name"] != TOKENIZER_ID or source[component]["revision"] != TOKENIZER_REVISION:
+            raise ValueError("Regenerate artifacts with the pinned Qwen3-8B-Base model and tokenizer")
+    if source["model"]["commit"] != TOKENIZER_REVISION:
+        raise ValueError("Regenerate artifacts with the pinned Qwen3-8B-Base commit")
+    if not isinstance(source["prompt_template"], str) or source["prompt_template"].count("{sentence}") != 1:
+        raise ValueError("Source prompt template must contain exactly one {sentence}")
     model = source["model"]
     if (
         model["backend"] != "nnsight"

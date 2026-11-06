@@ -1,0 +1,41 @@
+{
+  "filters": {},
+  "selected_sentences": 2096,
+  "run_directory": "/orfeo/cephfs/scratch/dssc/zenocosini/ac-tpr-cache/qwen3-8b-base-active-pass-long-agent-fewshot-nnsight/interventions",
+  "run_created_at": "2026-11-05T14:21:38.018872+00:00",
+  "model": {
+    "api": "LanguageModel",
+    "attention_implementation": "eager",
+    "backend": "nnsight",
+    "commit": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4",
+    "dtype": "bfloat16",
+    "name": "Qwen/Qwen3-8B-Base",
+    "nnsight_version": "0.7.0",
+    "revision": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4",
+    "transformers_version": "5.9.0",
+    "weight_processing": "none"
+  },
+  "execution_model": {
+    "api": "LanguageModel",
+    "attention_implementation": "eager",
+    "backend": "nnsight",
+    "commit": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4",
+    "dtype": "bfloat16",
+    "name": "Qwen/Qwen3-8B-Base",
+    "nnsight_version": "0.7.0",
+    "revision": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4",
+    "transformers_version": "5.9.0",
+    "weight_processing": "none"
+  },
+  "schema_version": 5,
+  "source_sha256": {
+    "metadata.json": "7f4f02449063ad526a35dabacf6948f065af965bd88602f943dc1948c3c97577",
+    "baseline.csv": "d552db1b68b9ee2dc4411e510415cc1f8dba1bfa6b13dd57a4211069963788a5",
+    "results.csv": "fe3841077260e82e12aee691ab3835161946ff0c6d1b0706e1bfd4211320e5ba"
+  },
+  "baseline_preference": "count(baseline_agent_logit > baseline_patient_logit) / all sentences",
+  "answer_score": "mean(intervened_agent_logit - intervened_patient_logit)",
+  "prediction_flip_rate": "strict agent-to-patient or patient-to-agent preference flips / all sentences",
+  "ties": "Ties before or after intervention do not count as flips; all sentences remain in the denominator",
+  "uncertainty": "Descriptive curves; no uncertainty intervals"
+}

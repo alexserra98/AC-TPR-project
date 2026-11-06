@@ -1,0 +1,67 @@
+{
+  "conversion": {
+    "pair_id": "2 * int(quad_id) + int(swapped)",
+    "removed_columns": [
+      "q_agent",
+      "q_agent_answer",
+      "q_patient",
+      "q_patient_answer",
+      "q_agent_verb",
+      "q_patient_verb"
+    ],
+    "source_row_order_preserved": true
+  },
+  "corpus_sha256": "e350b84dca96faa7c447d88dd9e20e5863c6360798aad330ca098455998ce5dc",
+  "counts": {
+    "pairs": 2904,
+    "quads": 1452,
+    "sentences": 5808,
+    "sentences_by_split": {
+      "gen_test": 1680,
+      "test": 416,
+      "train": 3300,
+      "val": 412
+    },
+    "sentences_by_subset": {
+      "mixed_contact": 1536,
+      "names_agentive": 2160,
+      "nouns_contact": 2112
+    }
+  },
+  "held_out_fillers": [
+    "Mary",
+    "teacher",
+    "rock"
+  ],
+  "seed": 42,
+  "source": {
+    "dataset": "iuliialysova/active_pass_long",
+    "file": "role_swap_long.csv",
+    "revision": "949033163b2a9d4d2e1d8c7811e0eaa7f27e749c",
+    "sha256": "8a7036e04cf533475c1a022f366fed8a5d327424a4fd9141783aa223ef298851",
+    "url": "https://huggingface.co/datasets/iuliialysova/active_pass_long/resolve/949033163b2a9d4d2e1d8c7811e0eaa7f27e749c/role_swap_long.csv"
+  },
+  "split_rules": {
+    "boundaries": "floor(0.8 * groups), floor(0.9 * groups)",
+    "gen_test": "Either role filler belongs to held_out_fillers",
+    "random_split_unit": "quad_id, sorted numerically before seeded shuffle",
+    "ratios_on_remaining_groups": {
+      "test": 0.1,
+      "train": 0.8,
+      "val": 0.1
+    }
+  },
+  "tokenizer": {
+    "add_special_tokens": false,
+    "backend_sha256": "41e00eccf531cffc2e562d38bdd879d41e5044ea279af5b73c6a32aabcc8fe04",
+    "name": "Qwen/Qwen3-8B-Base",
+    "revision": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4"
+  },
+  "validation": {
+    "prompt_roles_and_answer_tokens": "passed",
+    "prompt_template_sha256": "55ab3f6362178c3aaef17e4ef620ac6a1aec9e3181e90dacd124dd2f088722b2",
+    "rows_checked": 5808,
+    "sentence_role_tokens": "passed",
+    "verb_token_length_restricted": false
+  }
+}

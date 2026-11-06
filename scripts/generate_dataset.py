@@ -1,4 +1,4 @@
-"""Create a Pythia-tokenized active/passive corpus from a labelled filler CSV."""
+"""Create a Qwen-tokenized active/passive corpus from a labelled filler CSV."""
 
 import argparse
 from pathlib import Path

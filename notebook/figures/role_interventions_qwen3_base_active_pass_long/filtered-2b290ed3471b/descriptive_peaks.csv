@@ -1,0 +1,5 @@
+split,voice,layer,mean_type,edited_role,mean_logit_diff_change,intervened_patient_preference_rate,conditional_flip_rate
+test,active,21,by_voice,both,13.984375,0.825,0.825
+test,passive,19,by_voice,both,8.109375,0.75,0.7435897435897436
+gen_test,active,21,by_voice,both,13.73828125,0.8263888888888888,0.8263888888888888
+gen_test,passive,20,by_voice,both,8.386284722222221,0.7118055555555556,0.710801393728223

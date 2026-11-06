@@ -1,4 +1,6 @@
-"""Locate nonfinite Pythia activations in native and bridged FP16 forwards."""
+"""Historical experiment: requires its original checkout/environment.
+
+Locate nonfinite Pythia activations in native and bridged FP16 forwards."""
 
 import json
 from pathlib import Path

@@ -6,6 +6,8 @@ from collections import Counter
 import pytest
 import torch
 
+from ac_tpr.prompts import PROMPT_TEMPLATE
+
 from ac_tpr.syntactic_vectors import extract_syntactic_vectors
 
 
@@ -26,21 +28,22 @@ def source_run(tmp_path, model_metadata):
     activations = base + offsets[:, None, None, None]
     torch.save({"activations": activations, "rows": rows}, run / "activations.pt")
     metadata = {
-        "schema_version": 4,
-        "hook_names": ["gpt_neox.layers.0.output", "gpt_neox.layers.1.output"],
+        "schema_version": 5,
+        "prompt_template": PROMPT_TEMPLATE,
+        "hook_names": ["model.layers.0.output", "model.layers.1.output"],
         "corpus": "/example/corpus.csv",
         "corpus_sha256": "a" * 64,
         "model": {
             **model_metadata,
-            "name": "EleutherAI/pythia-6.9b", "revision": "step143000",
-            "commit": "b" * 40, "dtype": "float16",
+            "name": "Qwen/Qwen3-8B-Base", "revision": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4",
+            "commit": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4", "dtype": "float16",
         },
         "tokenizer": {
-            "name": "EleutherAI/pythia-6.9b", "revision": "step143000",
+            "name": "Qwen/Qwen3-8B-Base", "revision": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4",
             "backend_sha256": "c" * 64, "add_special_tokens": False,
             "padding_side": "right", "pad_token_id": 0,
         },
-        "activation_site": "Transformer block output, before final_layer_norm",
+        "activation_site": "Transformer block output, before final RMSNorm",
         "layer_indices": [0, 1],
         "roles": ["agent", "patient"],
         "axes": ["sentence", "layer", "role", "hidden"],
@@ -79,7 +82,7 @@ def test_means_and_artifact_roundtrip(source_run, tmp_path):
     source = json.loads((source_run / "metadata.json").read_text())
     for key in (
         "corpus", "corpus_sha256", "model", "tokenizer", "activation_site",
-        "layer_indices", "roles", "schema_version", "hook_names",
+        "layer_indices", "roles", "schema_version", "hook_names", "prompt_template",
     ):
         assert metadata[key] == source[key]
     assert json.loads((output / "metadata.json").read_text()) == metadata
@@ -126,7 +129,7 @@ def test_missing_training_groups_are_rejected(source_run, tmp_path, group):
     ("activation_site", "Final normalized output", "block outputs"),
     ("sentences_by_split", {"train": 6}, "split counts"),
     ("schema_version", 1, "Regenerate"),
-    ("hook_names", ["gpt_neox.layers.0.input", "gpt_neox.layers.1.input"], "hook names"),
+    ("hook_names", ["model.layers.0.input", "model.layers.1.input"], "hook names"),
 ])
 def test_incompatible_metadata_is_rejected(source_run, tmp_path, field, value, message):
     metadata = json.loads((source_run / "metadata.json").read_text())

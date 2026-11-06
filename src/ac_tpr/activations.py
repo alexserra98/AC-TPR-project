@@ -1,11 +1,9 @@
-"""Extract Pythia residual states at agent and patient tokens in corpus order."""
+"""Extract Qwen3-8B-Base residual states at agent and patient tokens in corpus order."""
 
-import csv
 import hashlib
 import json
 import os
 import platform
-import re
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -15,67 +13,16 @@ from pathlib import Path
 import torch
 import transformers
 from nnsight import LanguageModel
-from transformers import AutoTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer
 
 from ac_tpr.dataset import (
-    CORPUS_COLUMNS,
+    load_corpus,
     TOKENIZER_ID,
     TOKENIZER_REVISION,
-    validate_tokenization,
 )
 from ac_tpr.model import BLOCK_HOOK, SCHEMA_VERSION, load_model
 
-ROLES = ["agent", "patient"]
-
-
-def tokenize_roles(
-    rows: list[dict[str, str]], tokenizer: PreTrainedTokenizerFast
-) -> tuple[list[list[int]], torch.Tensor]:
-    """Validate filler tokens and locate semantic roles using character offsets.
-
-    Returned positions have shape [sentence, role], with agent before patient,
-    regardless of voice. Token indices exclude BOS/EOS and any batch padding.
-    Input:
-
-        row 0 (active):  "The cat chased the dog."
-        row 1 (passive): "The dog was chased by the cat."
-
-    Output: 
-
-        (input_ids, positions) = (
-            [[0, 1, 2, 3, 4, 5],
-             [0, 1, 2, 3, 4, 5, 6]],    
-            tensor([[1, 4],   # row 0: [agent token index, patient token index]
-                    [6, 1]])  # row 1: [agent token index, patient token index]"""
-    validate_tokenization(rows, tokenizer)
-    encoding = tokenizer(
-        [row["sentence"] for row in rows],
-        add_special_tokens=False,
-        return_offsets_mapping=True,
-    )
-    positions = []
-    for row, offsets in zip(rows, encoding["offset_mapping"], strict=True):
-        if row["agent"] == row["patient"]:
-            raise ValueError("Agent and patient must be distinct nouns")
-        role_positions = []
-        for role in ROLES:
-            matches = list(re.finditer(rf"\b{re.escape(row[role])}\b", row["sentence"]))
-            if len(matches) != 1:
-                raise ValueError(f"Expected one {role} noun in {row['sentence']!r}")
-            word = matches[0]
-            indices = [
-                index for index, (start, end) in enumerate(offsets)
-                if start < word.end() and end > word.start()
-            ]
-            if len(indices) != 1:
-                raise ValueError(f"The {role} noun must occupy exactly one token")
-            index = indices[0]
-            start, end = offsets[index]
-            if row["sentence"][start:end].strip() != row[role]:
-                raise ValueError(f"The {role} noun must occupy one whole token")
-            role_positions.append(index)
-        positions.append(role_positions)
-    return encoding["input_ids"], torch.tensor(positions, dtype=torch.long)
+from ac_tpr.prompts import PROMPT_TEMPLATE, ROLES, prepare_prompts, tokenize_roles
 
 
 @torch.inference_mode()
@@ -85,7 +32,7 @@ def extract_batch(
     """Return CPU states shaped [sentence, block, role, hidden].
 
     Each trace reads the residual stream after a transformer block. Block indices
-    are zero-based; the last block is captured before final_layer_norm. Embedding
+    are zero-based; the last block is captured before final RMSNorm. Embedding
     states and the final normalized model output are not included.
     """
     if model.training:
@@ -95,7 +42,7 @@ def extract_batch(
     with model.trace(inputs, use_cache=False) as tracer:
         states = []
         for layer in range(model.config.num_hidden_layers):
-            hidden = model.gpt_neox.layers[layer].output
+            hidden = model.model.layers[layer].output
             states.append(hidden[batch_indices, positions].cpu())
         result = torch.stack(states, dim=1).save()
         tracer.stop()
@@ -105,40 +52,30 @@ def extract_batch(
 def extract_activations(
     corpus_path: Path,
     output_dir: Path,
-    batch_size: int = 32,
+    batch_size: int = 8,
     device: str = "cuda",
-    dtype: str = "float32",
+    dtype: str = "bfloat16",
+    *, prompt_template: str = PROMPT_TEMPLATE,
 ) -> dict:
-    """Extract all corpus rows with the dataset's fixed Pythia checkpoint.
+    """Extract all corpus rows with the dataset's fixed Qwen3-8B-Base checkpoint.
 
     The output directory must not exist. activations.pt contains the CPU tensor,
     corpus rows, unpadded input IDs, and role positions. metadata.json is written
     only after extraction and saving succeed, and marks a complete run. The full
-    role tensor is kept in CPU memory (about 3.8 GiB for 3,840 rows in float32).
+    role tensor is kept in CPU memory (about 3.2 GiB for 5,808 rows in bfloat16).
     """
     started = time.monotonic()
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
-    if dtype not in {"float16", "bfloat16", "float32"}:
-        raise ValueError("dtype must be float16, bfloat16, or float32")
+    if dtype not in {"bfloat16", "float32"}:
+        raise ValueError("dtype must be bfloat16 or float32")
     if output_dir.exists():
         raise FileExistsError(f"Output directory already exists: {output_dir}")
-    with corpus_path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames != CORPUS_COLUMNS:
-            raise ValueError(f"Corpus CSV columns must be {CORPUS_COLUMNS}")
-        rows = list(reader)
-    if not rows or any(
-        None in row or any(value is None or value == "" for value in row.values())
-        for row in rows
-    ):
-        raise ValueError("Corpus must contain complete, nonempty rows")
-    if len({(row["pair_id"], row["voice"]) for row in rows}) != len(rows):
-        raise ValueError("Corpus (pair_id, voice) keys must be unique")
+    rows = load_corpus(corpus_path)
     tokenizer = AutoTokenizer.from_pretrained(
         TOKENIZER_ID, revision=TOKENIZER_REVISION, use_fast=True
     )
-    input_ids, positions = tokenize_roles(rows, tokenizer)
+    input_ids, positions, _ = prepare_prompts(rows, tokenizer, prompt_template)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
     print(f"Loading {TOKENIZER_ID} at {TOKENIZER_REVISION} ({dtype}, {device})", flush=True)
@@ -172,6 +109,7 @@ def extract_activations(
     )
     metadata = {
         "schema_version": SCHEMA_VERSION,
+        "prompt_template": prompt_template,
         "elapsed_seconds": time.monotonic() - started,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "corpus": str(corpus_path.resolve()),
@@ -187,7 +125,7 @@ def extract_activations(
             "padding_side": "right",
             "pad_token_id": tokenizer.pad_token_id,
         },
-        "activation_site": "Transformer block output, before final_layer_norm",
+        "activation_site": "Transformer block output, before final RMSNorm",
         "hook_names": [BLOCK_HOOK.format(layer=layer) for layer in range(model.config.num_hidden_layers)],
         "layer_indices": list(range(model.config.num_hidden_layers)),
         "roles": ROLES,

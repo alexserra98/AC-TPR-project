@@ -1,4 +1,6 @@
-"""Compare TransformerLens outputs with the captured pre-migration references."""
+"""Historical experiment: requires its original checkout/environment.
+
+Compare TransformerLens outputs with the captured pre-migration references."""
 
 import argparse
 import csv

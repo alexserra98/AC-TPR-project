@@ -1,4 +1,4 @@
-"""Check corpus semantics, split isolation, and the actual Pythia tokenization."""
+"""Check corpus semantics, split isolation, and the actual Qwen tokenization."""
 
 import csv
 import json
@@ -201,7 +201,7 @@ def test_output_metadata_and_bytes_are_reproducible(tmp_path, tokenizer, monkeyp
         Counter(row["split"] for row in rows if row["voice"] == "active")
     )
     assert metadata["held_out_nouns"] == sorted(HELD_OUT)
-    assert metadata["tokenizer"]["revision"] == "step143000"
+    assert metadata["tokenizer"]["revision"] == "49e3418fbbbca6ecbdf9608b4d22e5a407081db4"
     assert metadata["tokenizer"]["add_special_tokens"] is False
 
 

@@ -1,4 +1,6 @@
-"""Save references using the pre-migration ac_tpr sources and Transformers 4.57.6."""
+"""Historical experiment: requires its original checkout/environment.
+
+Save references using the pre-migration ac_tpr sources and Transformers 4.57.6."""
 
 import argparse
 import csv

@@ -1,4 +1,6 @@
-"""Execute the NNsight experiment notebooks after successful regeneration."""
+"""Historical experiment: requires its original checkout/environment.
+
+Execute the NNsight experiment notebooks after successful regeneration."""
 
 from pathlib import Path
 

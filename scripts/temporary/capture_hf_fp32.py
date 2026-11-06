@@ -1,4 +1,6 @@
-"""Compare classic Pythia outputs with an independent HF float32 forward."""
+"""Historical experiment: requires its original checkout/environment.
+
+Compare classic Pythia outputs with an independent HF float32 forward."""
 
 import argparse
 import json

@@ -29,8 +29,11 @@
   "source_sha256": {
     "metadata.json": "2cc7db3b4f73cea0e2e099ad5c898d1768871717448371a2c9bc6dd94ce47c20",
     "baseline.csv": "2f83b080517f323cbc674a5de0063f2ec3217dcf988aa3a1855bc7c2c76543f5",
-    "summary.csv": "f366a9441aeef8607fdfe3850c5549a30bce5fe4520bdfdbaf2bbcd0b5f2743f"
+    "results.csv": "2e1369095519565340d4dcb371689149e0e19dd88abc23ace59c953c7ebfd8b8"
   },
-  "conditional_flip_rate": "agent_to_patient_flip_rate / baseline_agent_preference_rate",
+  "baseline_preference": "count(baseline_agent_logit > baseline_patient_logit) / all sentences",
+  "answer_score": "mean(intervened_agent_logit - intervened_patient_logit)",
+  "prediction_flip_rate": "strict agent-to-patient or patient-to-agent preference flips / all sentences",
+  "ties": "Ties before or after intervention do not count as flips; all sentences remain in the denominator",
   "uncertainty": "Descriptive curves; no uncertainty intervals"
 }
