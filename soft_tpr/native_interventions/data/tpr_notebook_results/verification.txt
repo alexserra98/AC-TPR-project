@@ -1,0 +1,6 @@
+Verified inside soft_tpr/native_interventions in the destination repository.
+role_interventions_tpr_qwen3.ipynb: all cells completed on CPU, 6 inline plots identical to the original run
+role_interventions_soft_tpr_qwen3.ipynb: all cells completed on CPU, 6 inline plots identical to the original run
+role_interventions_comparison_qwen3.ipynb: all cells completed on CPU, 6 inline plots identical to the original run
+Archive and artifact checksums verified. No separate image files created.
+The regeneration launcher was checked in dry-run mode; the GPU experiment was not repeated.
