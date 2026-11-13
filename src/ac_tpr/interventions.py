@@ -54,6 +54,7 @@ def score_batch(
     model: LanguageModel, inputs: dict[str, torch.Tensor], answer_ids: torch.Tensor,
     layer: int | None = None, positions: torch.Tensor | None = None,
     deltas: torch.Tensor | None = None,
+    *, allow_final_token: bool = False,
 ) -> torch.Tensor:
     """Return CPU float32 [agent, patient] logits at each last non-padding token.
 
@@ -62,6 +63,8 @@ def score_batch(
     [batch, 2], with deltas shaped [batch, hidden] or [batch, 2, hidden].
     Other tokens and block outputs are preserved.
     Updates use float32 arithmetic and are cast back to the residual dtype.
+    Set allow_final_token to permit edits at the scored prompt token; padding
+    positions remain invalid.
     """
     if model.training:
         raise ValueError("Scoring requires model.eval()")
@@ -93,7 +96,10 @@ def score_batch(
             edit_batch, edit_last = batch[:, None], last[:, None]
         else:
             edit_batch, edit_last = batch, last
-        if ((positions < 0) | (positions >= edit_last)).any():
+        if allow_final_token:
+            if ((positions < 0) | (positions > edit_last)).any():
+                raise ValueError("Edited tokens must be non-padding prompt tokens")
+        elif ((positions < 0) | (positions >= edit_last)).any():
             raise ValueError("Edited tokens must precede the final prompt token")
 
     with model.trace(inputs, use_cache=False):

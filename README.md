@@ -462,6 +462,128 @@ post-intervention ties do not count as flips. Curves are descriptive means with
 no uncertainty intervals. The largest displayed effects are selected across the
 sweep and are not independently validated best settings.
 
+## TPR decomposition and steering
+
+`src/ac_tpr/tpr/pipeline.py` documents and runs the DISCOVER adaptation. The
+stages are implemented separately in `data.py`, `extraction.py`, `unpacking.py`,
+`decomposition.py`, `reconstruction.py`, and `steering.py`; `training.py` supplies the shared fitting
+loop. The module uses the existing model loader, prompt preparation, extraction
+hook, and final-token scorer. It does not import the sibling DISCOVER checkout.
+Upstream attribution and license are in `src/ac_tpr/tpr/NOTICE.md`.
+
+The default experiment uses blocks **5, 12, 15, 24, 31** and independently fits
+both **sentence_end** and **prompt_end** sites. The former is the token containing
+the target sentence's final period (`".\n"` with the current tokenizer); the latter
+is the final non-padding `":"` in `Answer:`. Both come from the complete few-shot
+prompt and use block outputs before final RMSNorm. The unpacker reconstructs only
+the target sentence, preserving capitalization and treating punctuation as a
+separate token.
+
+Each input has four symbolic bindings: noun→agent, verb lemma→verb, noun→patient,
+and active/passive→voice. Semantic roles and noun embeddings are shared across
+voices. Voice is an explicit categorical binding; it is not a copy of the prompt.
+This hypothesis makes the noun-swap direction independent of voice at a given
+layer/site. The existing voice-specific demonstrations still confound voice with
+prompt context, so these experiments do not isolate syntax from demonstrations.
+
+For each layer/site, train-only mean and population standard deviation define
+`z = (h - mean) / scale`, with `scale = std + 1e-10`. The unpacker learns to decode
+`z` into the sentence. Independently, the TPR learns
+`T(bindings) = W vec(sum(filler_embedding ⊗ role_embedding)) + b` to approximate
+that same `z`. It never fits unpacker hidden states. Frozen unpackers evaluate
+real states, TPR approximations, and role-edited states using free generation.
+
+### TPR splits and novel bindings
+
+TPR preparation preserves the CSV's `split` and adds `tpr_split`. Original
+`gen_test` is excluded because Mary, teacher, and rock are unseen fillers.
+By default, every **John→agent** and **doctor→patient** example, in either voice,
+is withheld from fitting and assigned to `binding_test`. Both nouns remain in
+training in their opposite roles. All vocabulary and normalization fitting uses
+only `tpr_split=train`; validation selects checkpoints, and binding-test examples
+never enter either process.
+
+| TPR split | Sentences |
+| --- | ---: |
+| train | 2,868 |
+| val | 366 |
+| test | 366 |
+| binding_test | 528 |
+
+Counterfactual donors exchange the nouns while preserving verb and voice. They
+can cross TPR partitions and are used only as controls and expected outputs;
+the TPR swap itself needs no donor activation. Evaluation uses the original test
+rows plus every binding-test row (894 sources). With the defaults, **50** held-out
+source sentences test steering *into* a novel binding. The other 528 binding-test
+sources test reconstruction of novel bindings and steering away from them.
+Results group source and target TPR splits separately; use
+`condition=swap,target_binding_held_out=True` for novel-binding steering.
+
+### Run the stages
+
+Use the locked environment and cache variables described above. A full run uses
+DISCOVER-sized unpackers (6 layers, width 1024, 16 heads, FFN 4096) and 100×100
+TPR embeddings. This trains ten unpackers and ten TPRs sequentially; the frozen
+LLM is released during auxiliary training.
+
+```bash
+OMP_NUM_THREADS=2 HF_HUB_OFFLINE=1 .venv/bin/python scripts/temporary/run_tpr_pipeline.py \
+  --output-dir /orfeo/scratch/dssc/zenocosini/ac-tpr-cache/tpr-qwen3-base \
+  --layers 5 12 15 24 31
+```
+
+The default corpus is `data/active_pass_long/corpus.csv`. Defaults are Adam,
+batch size 32, learning rates `1e-4` for unpackers and `1e-3` for TPRs, seed 42,
+and a 100-epoch cap. Validation runs every 100 updates and at the final update.
+After five evaluations without improvement, training restores the best weights,
+halves the learning rate, and resets Adam. It permits five reductions and then
+stops on the next plateau. Dimensions, limits, seed, and bindings are configurable;
+see `--help`. For example, `--held-out-bindings John:patient doctor:agent` changes
+the withheld pairs; `--held-out-bindings` alone disables binding holdouts.
+
+Use `--stage extract`, `unpack`, `fit`, `reconstruct`, or `steer` with the same
+output root to run stages individually. `fit` depends only on extraction, not
+on the unpacker. Later stages read the extraction's layers, splits, and vocabulary;
+extraction flags do not modify an existing cache. Existing output directories for
+the selected stage are rejected, including incomplete stages. Use a fresh output
+directory or explicitly remove an incomplete stage before retrying. This is not
+automatic checkpoint resumption.
+
+Outputs are `encodings/`, `unpackers/`, `tprs/`, `reconstruction/`, and `steering/`.
+Checkpoints include the fitted parameters and training histories; caches retain
+vocabularies, normalization statistics, and original row indices. Completion
+metadata verifies source extraction identity when loading auxiliary models.
+Steering also verifies current prompt token IDs, tokenizer, checkpoint, and dtype.
+
+### Interpret evaluation
+
+The role edit is `h + alpha * scale * (T(swapped) - T(original))`, with `alpha=1`
+by default. It keeps the activation residual that the TPR did not explain.
+Each layer/site is edited independently. Controls are zero delta, original TPR
+replacement, and real swapped-sentence donor replacement. All conditions score
+the original LLM's final-token candidate logits, using the same patient-minus-agent
+convention as centroids. Both all-example and baseline-agent-conditional flip rates
+are saved. These are pairwise preferences, not unrestricted generation accuracy.
+
+`reconstruction/results.csv` records generated tokens, exact-match results, and
+normalized activation MSE; its summary separates real, TPR, and swapped states.
+`steering/baseline.csv`, `results.csv`, and `summary.csv` preserve corpus annotations
+and identify the site, condition, original corpus indices, and binding direction.
+Final-block sentence-end edits must be null; final-block prompt-end donor edits
+must reproduce donor logits. These controls are exercised in tests and the smoke
+driver, which adds block 35 to the requested experimental layers.
+
+```bash
+OMP_NUM_THREADS=2 HF_HUB_OFFLINE=1 .venv/bin/python scripts/temporary/validate_tpr_pipeline.py \
+  --output-dir /tmp/tpr-qwen3-smoke
+```
+
+The smoke run uses the real frozen Qwen checkpoint with tiny auxiliary models and
+one training epoch. It checks execution, artifact loading, controls, and an
+independent Hugging Face baseline. It is not a research result. Successful sentence
+reconstruction alone does not guarantee steering: other untouched LLM token states
+can still influence the answer. Read donor-control performance alongside TPR effects.
+
 ## Tests
 
 ```bash
@@ -494,6 +616,7 @@ only one position per sentence.
 ## Layout
 
 - `src/ac_tpr/`: dataset, activations, role means, and intervention/evaluation code.
+- `src/ac_tpr/tpr/`: sentence unpacking, symbolic approximation, and TPR steering.
 - `scripts/`: command-line entry points.
 - `data/`: active_pass_long, starter fillers, reference data, and generated corpus.
 - `docs/`: [paper review and experiment rationale](docs/acevedo-2026-notes.md).

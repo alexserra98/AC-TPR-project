@@ -166,7 +166,7 @@ def test_enriched_small_model_pipeline(tmp_path, corpus, tokenizer, model, model
     extract_syntactic_vectors(activations, vectors)
     metadata = run_interventions(path, vectors, scores, batch_size=3, device="cpu", dtype="float32")
     assert metadata["baseline_rows"] == 8
-    assert metadata["result_rows"] == 64
+    assert metadata["result_rows"] == 32  # 8 sentences × 2 layers × 2 joint-edit mean types.
     assert metadata["prompt_template"] == PROMPT_TEMPLATE
     assert metadata["controls"] == {"zero_vector_first_batch": "passed", "final_block_all_rows": "passed"}
     expected = {(row["pair_id"], row["voice"]): row for row in rows}

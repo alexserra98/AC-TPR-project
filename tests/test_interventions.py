@@ -431,3 +431,42 @@ def test_invalid_joint_edits_are_rejected(model, inputs, problem):
         error = "int64"
     with pytest.raises(ValueError, match=error):
         score_batch(model, batch_inputs, answers, 0, positions, deltas)
+
+
+@pytest.mark.parametrize("layer", [0, 1])
+def test_final_token_opt_in_matches_hf_edit(model, hf_model, inputs, layer):
+    batch_inputs, _, answers = inputs
+    last = batch_inputs["attention_mask"].sum(dim=1) - 1
+    deltas = torch.arange(32).expand(3, 32).float() / 32
+    baseline = score_batch(model, batch_inputs, answers)
+    with pytest.raises(ValueError, match="must precede"):
+        score_batch(model, batch_inputs, answers, layer, last, deltas)
+    actual = score_batch(
+        model, batch_inputs, answers, layer, last, deltas, allow_final_token=True,
+    )
+
+    def translate(_module, _args, hidden):
+        result = hidden.clone()
+        result[torch.arange(3), last] += deltas
+        return result
+
+    handle = hf_model.model.layers[layer].register_forward_hook(translate)
+    try:
+        with torch.inference_mode():
+            full = hf_model(**batch_inputs, use_cache=False).logits
+    finally:
+        handle.remove()
+    expected = full[torch.arange(3), last].gather(1, answers)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+    assert not torch.allclose(actual, baseline)
+    torch.testing.assert_close(score_batch(model, batch_inputs, answers), baseline, rtol=0, atol=0)
+
+
+def test_final_token_opt_in_still_rejects_padding(model, inputs):
+    batch_inputs, _, answers = inputs
+    first_padding = batch_inputs["attention_mask"].sum(dim=1)
+    with pytest.raises(ValueError, match="non-padding"):
+        score_batch(
+            model, batch_inputs, answers, 0, first_padding, torch.zeros(3, 32),
+            allow_final_token=True,
+        )
